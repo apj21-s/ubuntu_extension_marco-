@@ -1,0 +1,7 @@
+{
+  "uuid": "charging-splash@arco",
+  "name": "Charging Splash",
+  "description": "Plugging in the charger sends a soft crimson glow up from the bottom of the screen with the battery %; unplugging gives a short dim pulse.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

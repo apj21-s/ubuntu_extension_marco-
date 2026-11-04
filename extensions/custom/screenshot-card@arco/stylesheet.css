@@ -1,0 +1,27 @@
+/* Screenshot Card - obsidian + crimson, matches the Quick Settings menus */
+.ssc-card {
+  background-color: rgb(31, 30, 31);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 18px;
+  padding: 10px;
+  spacing: 8px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.6);
+}
+.ssc-thumb { border-radius: 10px; background-color: rgba(0, 0, 0, 0.35); }
+.ssc-status { color: #e6ddd3; font-size: 0.85em; font-weight: 600; }
+.ssc-row { spacing: 6px; }
+.ssc-btn {
+  padding: 5px 0; border-radius: 99px; font-size: 0.85em; font-weight: 600;
+  color: #e6ddd3; background-color: rgba(230, 221, 211, 0.08);
+  transition-duration: 150ms;
+}
+.ssc-btn:hover, .ssc-btn:focus { background-color: rgba(230, 221, 211, 0.16); }
+.ssc-btn.ssc-save { background-color: rgba(177, 68, 77, 0.55); color: #f5eee6; }
+.ssc-btn.ssc-save:hover, .ssc-btn.ssc-save:focus { background-color: #b1444d; }
+.ssc-btn.ssc-delete:hover, .ssc-btn.ssc-delete:focus { background-color: rgba(142, 42, 50, 0.7); }
+.ssc-close {
+  margin: 6px; padding: 5px; border-radius: 99px;
+  color: #f5eee6; background-color: rgba(14, 12, 12, 0.72);
+  transition-duration: 150ms;
+}
+.ssc-close:hover, .ssc-close:focus { background-color: #b1444d; }

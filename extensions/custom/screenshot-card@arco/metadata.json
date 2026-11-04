@@ -1,0 +1,7 @@
+{
+  "uuid": "screenshot-card@arco",
+  "name": "Screenshot Card",
+  "description": "After a screenshot, a thumbnail card slides into the bottom-right corner with Save / Open / Copy / Delete. Screenshots are only kept in ~/Pictures/Screenshots if you press Save (the image stays in the clipboard either way).",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}
