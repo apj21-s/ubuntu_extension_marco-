@@ -1,0 +1,28 @@
+/* Hotspot tile menu - obsidian + crimson to match the rest of the desktop */
+.hsd-heading { padding-top: 6px; padding-bottom: 0; }
+.hsd-heading .popup-menu-item-label, .hsd-heading StLabel {
+  font-size: 0.8em; font-weight: bold; color: rgba(230, 221, 211, 0.55);
+}
+.hsd-row { spacing: 8px; padding-top: 3px; padding-bottom: 3px; }
+.hsd-name { font-weight: 600; color: #e6ddd3; }
+.hsd-sub { font-size: 0.78em; color: rgba(230, 221, 211, 0.55); }
+.hsd-btn {
+  padding: 3px 11px; border-radius: 99px; font-size: 0.85em; font-weight: 600;
+  color: #e6ddd3; background-color: rgba(230, 221, 211, 0.08);
+  transition-duration: 150ms;
+}
+.hsd-btn:hover, .hsd-btn:focus { background-color: rgba(230, 221, 211, 0.16); }
+.hsd-btn.hsd-danger:hover, .hsd-btn.hsd-danger:focus { background-color: rgba(177, 68, 77, 0.55); }
+.hsd-btn.hsd-accent { background-color: rgba(177, 68, 77, 0.45); color: #f5eee6; }
+.hsd-btn.hsd-accent:hover, .hsd-btn.hsd-accent:focus { background-color: #b1444d; }
+.hsd-scroll { max-height: 220px; }
+.hsd-fold .hsd-name { color: rgba(230, 221, 211, 0.75); font-weight: 600; }
+/* floating card over the tiles */
+/* solid, so the tiles behind never show through. Blur my Shell makes every
+   .quick-toggle-menu 8% white with !important, so this needs !important and a more
+   specific selector; the colour matches how the Wired/Bluetooth menus look on the panel */
+.quick-toggle-menu-container .quick-toggle-menu.hsd-float {
+  background: rgb(31, 30, 31) !important;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.65) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+}

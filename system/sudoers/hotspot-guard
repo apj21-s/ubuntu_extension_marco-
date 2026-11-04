@@ -1,2 +1,3 @@
-# Let @USER@ list devices and undo blocks without a password.
-@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/hotspot-guard list, /usr/local/sbin/hotspot-guard unblock *, /usr/local/sbin/hotspot-guard untrust *
+# Let @USER@ see hotspot devices and block / kick / unblock / untrust them without a password
+# (used by the Hotspot tile in Quick Settings). The script only accepts MAC addresses.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/hotspot-guard list, /usr/local/sbin/hotspot-guard status, /usr/local/sbin/hotspot-guard block *, /usr/local/sbin/hotspot-guard kick *, /usr/local/sbin/hotspot-guard unblock *, /usr/local/sbin/hotspot-guard untrust *

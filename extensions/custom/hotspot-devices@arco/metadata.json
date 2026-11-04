@@ -1,0 +1,7 @@
+{
+  "uuid": "hotspot-devices@arco",
+  "name": "Hotspot Devices",
+  "description": "Android-style Hotspot tile in Quick Settings: turn the hotspot on/off, Stay awake switch, see connected devices, kick or block them, and unblock or forget them later. Uses /usr/local/sbin/hotspot-guard.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

@@ -26,7 +26,8 @@ export default class DragSwitchExtension extends Extension {
             Main.xdndHandler.connect('drag-end', () => this._end()),
         ];
         this._bar = new St.Widget({
-            style: 'background-color: rgba(232,44,58,0.85); border-radius: 3px;',
+            // same crimson as the dock's running dots and the notification badges
+            style: 'background-color: #b1444d; border-radius: 3px; box-shadow: 0 0 8px 1px rgba(177,68,77,0.6);',
             reactive: false, visible: false,
         });
         Main.layoutManager.uiGroup.add_child(this._bar);
