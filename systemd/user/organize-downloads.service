@@ -1,0 +1,8 @@
+[Unit]
+Description=Organize ~/Downloads
+
+[Service]
+Type=oneshot
+# Wait so a just-finished download is settled before sorting.
+ExecStartPre=/bin/sleep 150
+ExecStart=%h/.local/bin/organize-downloads

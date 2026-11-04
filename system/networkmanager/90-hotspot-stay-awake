@@ -1,0 +1,19 @@
+#!/bin/bash
+# Turn Stay Awake on when the "Hotspot" connection starts, off when it stops.
+# Only turns it off if this script turned it on (a manual Stay Awake is left alone).
+[ "$CONNECTION_ID" = "Hotspot" ] || exit 0
+MARK=/run/user/@UID@/stay-awake-by-hotspot
+as_user() {
+  runuser -u @USER@ -- env XDG_RUNTIME_DIR=/run/user/@UID@ \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus "$@"
+}
+[ -S /run/user/@UID@/bus ] || exit 0
+case "$2" in
+  up)
+    if ! as_user systemctl --user is-active --quiet stay-awake; then
+      as_user @HOME@/.local/bin/stay-awake on && touch "$MARK"
+    fi ;;
+  down)
+    if [ -f "$MARK" ]; then rm -f "$MARK"; as_user @HOME@/.local/bin/stay-awake off; fi ;;
+esac
+exit 0

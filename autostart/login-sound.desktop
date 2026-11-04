@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Login sound
+Comment=Soft startup sound (I Found You theme)
+Exec=sh -c "sleep 4; canberra-gtk-play -i desktop-login"
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

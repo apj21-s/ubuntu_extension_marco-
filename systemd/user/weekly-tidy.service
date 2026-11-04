@@ -1,0 +1,7 @@
+[Unit]
+Description=Weekly personal tidy and report
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=%h/.local/bin/weekly-tidy

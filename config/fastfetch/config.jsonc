@@ -1,0 +1,28 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  // "I Found You" — dark, cinematic, one neon red line (matches the wallpaper)
+  "logo": {
+    "type": "data",
+    "source": "$3                  .\n$1              ▄▄\n$1            ▄████▄       ▄▄\n$1        ▄▄▄██████████▄▄▄█████▄\n$1     ▄███████████████████████▄\n$1   ▄████████████████████████████▄\n$2 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n$3        i   f o u n d   y o u",
+    "color": { "1": "38;2;74;64;64", "2": "38;2;232;44;58", "3": "38;2;110;98;96" },
+    "padding": { "top": 2, "left": 2, "right": 4 }
+  },
+  "display": {
+    "separator": "  ",
+    "color": { "keys": "38;2;232;44;58", "output": "38;2;230;221;211" },
+    "key": { "width": 12 }
+  },
+  "modules": [
+    { "type": "custom", "format": "\u001b[1;38;2;245;238;230marco\u001b[0m\u001b[38;2;110;98;96m  ·  hp 250 g9  ·  ubuntu 26.04\u001b[0m" },
+    { "type": "custom", "format": "\u001b[38;2;74;64;64m──────────────────────────────────────────\u001b[0m" },
+    { "type": "kernel",  "key": "◆ kernel" },
+    { "type": "uptime",  "key": "◆ uptime" },
+    { "type": "cpu",     "key": "◆ cpu", "format": "i3-1215U · {cores-logical} threads · {freq-max}" },
+    { "type": "memory",  "key": "◆ memory" },
+    { "type": "disk",    "key": "◆ disk", "folders": "/", "format": "{size-used} / {size-total} ({size-percentage})" },
+    { "type": "battery", "key": "◆ battery", "format": "{capacity} · {status}" },
+    { "type": "media",   "key": "♪ playing", "keyColor": "38;2;232;44;58", "format": "{title} — {artist}" },
+    "break",
+    { "type": "colors", "symbol": "circle", "paddingLeft": 0 }
+  ]
+}

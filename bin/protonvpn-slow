@@ -1,0 +1,11 @@
+#!/usr/bin/python3 -I
+# Same as "protonvpn", but waits up to 45 s for a connection instead of 10 s
+# (needed on networks where the VPN takes longer to connect).
+import sys
+from importlib.metadata import distribution
+import proton.vpn.cli.core.controller as controller
+controller._wait_for_event.__wrapped__.__defaults__ = (None, 45, False)
+ep = next(e for e in distribution("proton-vpn-cli").entry_points
+          if e.group == "console_scripts" and e.name == "protonvpn")
+sys.argv[0] = "protonvpn"
+sys.exit(ep.load()())

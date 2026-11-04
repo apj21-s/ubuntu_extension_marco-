@@ -1,0 +1,42 @@
+#!/bin/bash
+# Android-style notification: pops up, hides by itself after a few seconds,
+# and stays in the notification list (clock menu). Takes notify-send options.
+# A new notification hides the previous popup right away.
+# Show time: NOTIFY_SECONDS (default 6).
+T=${NOTIFY_SECONDS:-6}
+STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/notify-last.pid"
+
+# Hide the previous popup now (its helper moves it to the list).
+if [ -f "$STATE" ]; then
+  prev=$(cat "$STATE" 2>/dev/null)
+  [ -n "$prev" ] && kill -TERM "$prev" 2>/dev/null
+  sleep 0.15
+fi
+
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null)" = "true" ]; then
+  # Normal mode: GNOME hides it by itself; still replace the previous one quickly.
+  id=$(notify-send -u normal -p "$@") || exit 1
+  keep_copy=0
+else
+  # Do Not Disturb: show anyway, then hide and keep a copy in the list.
+  id=$(notify-send -u critical -p "$@") || exit 1
+  keep_copy=1
+fi
+
+(
+  done_=0
+  finish() {
+    [ $done_ -eq 1 ] && exit 0; done_=1
+    [ -n "$sp" ] && kill "$sp" 2>/dev/null
+    gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+      --method org.freedesktop.Notifications.CloseNotification "$id" >/dev/null 2>&1
+    [ $keep_copy -eq 1 ] && notify-send -u normal "$@"
+    exit 0
+  }
+  trap finish TERM
+  sleep "$T" & sp=$!
+  wait $sp
+  finish
+) >/dev/null 2>&1 &
+echo $! > "$STATE"
+disown

@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Headphone magic: pause music when headphones are unplugged, resume it when
+they are plugged back in. Works for the wired jack and Bluetooth headphones.
+Only reads audio state; never touches the sound card itself."""
+import json, subprocess, time, os
+
+NOTIFY = os.path.expanduser("~/.local/bin/notify")
+MPRIS = "org.mpris.MediaPlayer2."
+
+
+def run(*cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+
+
+def headphones_connected():
+    try:
+        cards = json.loads(run("pactl", "-f", "json", "list", "cards") or "[]")
+    except ValueError:
+        return None  # unknown; don't act
+    for card in cards:
+        if card.get("name", "").startswith("bluez_card"):
+            return True
+        for name, port in (card.get("ports") or {}).items():
+            kind = f"{name} {port.get('type', '')}".lower()
+            if ("headphone" in kind or "headset" in kind) and "[out]" in name.lower() \
+                    and port.get("availability") == "available":
+                return True
+    return False
+
+
+def players():
+    out = run("gdbus", "call", "--session", "--dest", "org.freedesktop.DBus",
+              "--object-path", "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.ListNames")
+    return [n.strip(" '[](),") for n in out.split(",") if MPRIS in n]
+
+
+def status(player):
+    out = run("gdbus", "call", "--session", "--dest", player, "--object-path", "/org/mpris/MediaPlayer2",
+              "--method", "org.freedesktop.DBus.Properties.Get",
+              "org.mpris.MediaPlayer2.Player", "PlaybackStatus")
+    return "Playing" if "Playing" in out else "Other"
+
+
+def control(player, action):
+    run("gdbus", "call", "--session", "--dest", player, "--object-path", "/org/mpris/MediaPlayer2",
+        "--method", f"org.mpris.MediaPlayer2.Player.{action}")
+
+
+def notify(title, body):
+    if os.access(NOTIFY, os.X_OK):
+        subprocess.Popen([NOTIFY, "-i", "audio-headphones-symbolic", title, body],
+                         env={**os.environ, "NOTIFY_SECONDS": "3"},
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    state = headphones_connected()
+    paused_by_us = []
+    sub = subprocess.Popen(["pactl", "subscribe"], stdout=subprocess.PIPE, text=True)
+    for line in sub.stdout:
+        if " on card " not in line and " on sink " not in line:
+            continue
+        time.sleep(0.3)  # let the change settle
+        now = headphones_connected()
+        if now is None or now == state:
+            continue
+        if state and not now:  # unplugged
+            paused_by_us = [p for p in players() if status(p) == "Playing"]
+            for p in paused_by_us:
+                control(p, "Pause")
+            if paused_by_us:
+                notify("Headphones unplugged", "Music paused")
+        elif now and not state:  # plugged in
+            alive = set(players())
+            resumed = [p for p in paused_by_us if p in alive]
+            for p in resumed:
+                control(p, "Play")
+            paused_by_us = []
+            if resumed:
+                notify("Headphones connected", "Music resumed")
+        state = now
+    raise SystemExit(1)  # pactl exited; systemd restarts us
+
+
+if __name__ == "__main__":
+    main()

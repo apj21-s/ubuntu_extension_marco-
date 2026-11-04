@@ -1,0 +1,10 @@
+#!/bin/bash
+# Weekly system tidy (runs as root): unused packages + downloaded package files.
+before=$(df --output=avail -B1M / | tail -1)
+apt-get autoremove -y --purge >/dev/null 2>&1
+apt-get clean
+journalctl --vacuum-size=300M >/dev/null 2>&1
+after=$(df --output=avail -B1M / | tail -1)
+mkdir -p /var/lib/weekly-tidy
+echo "$(( after - before ))" > /var/lib/weekly-tidy/freed-mb
+date +%s > /var/lib/weekly-tidy/last-run

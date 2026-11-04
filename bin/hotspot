@@ -1,0 +1,22 @@
+#!/bin/bash
+# Mobile hotspot: hotspot on|off. Turns Wi-Fi on first if it's off.
+case "$1" in
+  on)
+    if [ "$(nmcli radio wifi)" != "enabled" ]; then
+      nmcli radio wifi on || exit 1
+      # Wait (up to 15 s) for the Wi-Fi card to be ready.
+      for i in $(seq 30); do
+        state=$(nmcli -t -f DEVICE,STATE device | awk -F: '$1=="@WIFI@"{print $2}')
+        [ -n "$state" ] && [ "$state" != "unavailable" ] && break
+        sleep 0.5
+      done
+    fi
+    for try in 1 2 3; do
+      nmcli connection up Hotspot >/dev/null 2>&1 && exit 0
+      sleep 2
+    done
+    "$HOME/.local/bin/notify" -i network-wireless-hotspot-symbolic "Hotspot didn't start" "Try again in a few seconds."
+    exit 1 ;;
+  off) nmcli connection down Hotspot >/dev/null 2>&1; exit 0 ;;
+  *) echo "Usage: hotspot on|off"; exit 2 ;;
+esac

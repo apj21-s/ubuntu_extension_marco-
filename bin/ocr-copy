@@ -1,0 +1,16 @@
+#!/bin/bash
+# Drag over any area of the screen; the text in it is copied to the clipboard.
+for t in tesseract wl-copy; do
+  command -v $t >/dev/null || { "$HOME/.local/bin/notify" "Copy text from screen" "Missing $t. Run: sudo apt install tesseract-ocr wl-clipboard"; exit 1; }
+done
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+shot=$("$HOME/.local/bin/screen-area")
+[ -n "$shot" ] && [ -s "$shot" ] || exit 0   # selection cancelled
+mv -f -- "$shot" "$tmp/shot.png"
+text=$(tesseract "$tmp/shot.png" - -l eng --psm 6 2>/dev/null | sed -e 's/[[:space:]]*$//' | sed -e '/./,$!d')
+if [ -z "$(echo "$text" | tr -d '[:space:]')" ]; then
+  "$HOME/.local/bin/notify" -i edit-copy-symbolic "No text found" "Try selecting a larger or clearer area."
+  exit 0
+fi
+printf '%s' "$text" | wl-copy
+"$HOME/.local/bin/notify" -i edit-copy-symbolic "Text copied (${#text} chars)" "$(echo "$text" | head -c 120)"

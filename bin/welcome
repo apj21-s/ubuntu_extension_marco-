@@ -1,0 +1,49 @@
+#!/bin/bash
+# Terminal welcome screen — "I Found You" style (dark, warm text, one neon red accent).
+# Never waits on the network: weather comes from a cache refreshed in the background.
+RED=$'\e[38;2;232;44;58m'; WARM=$'\e[38;2;230;221;211m'; BRIGHT=$'\e[1;38;2;245;238;230m'
+DIM=$'\e[38;2;110;98;96m'; DARK=$'\e[38;2;74;64;64m'; SAGE=$'\e[38;2;143;179;154m'
+IT=$'\e[3m'; R=$'\e[0m'
+cache="$HOME/.cache/welcome"; mkdir -p "$cache"
+
+command -v fastfetch >/dev/null && fastfetch 2>/dev/null
+
+# Greeting
+h=$(date +%H)
+if   [ "$h" -lt 5 ];  then greet="up late"
+elif [ "$h" -lt 12 ]; then greet="good morning"
+elif [ "$h" -lt 17 ]; then greet="good afternoon"
+else greet="good evening"; fi
+printf '  %s%s, %s.%s   %s%s%s\n' "$BRIGHT" "$greet" "$USER" "$R" "$DIM" "$(date '+%a %d %b  ·  %I:%M %p' | tr 'A-Z' 'a-z')" "$R"
+
+# Status chips: Stay Awake, Hotspot, weather
+chip() {  # $1 label, $2 on/off-or-text, $3 on?
+  if [ "$3" = 1 ]; then printf '%s●%s %s%s %s%s' "$RED" "$R" "$WARM" "$1" "$2" "$R"
+  else printf '%s○ %s %s%s' "$DIM" "$1" "$2" "$R"; fi
+}
+sa_on=0; systemctl --user is-active --quiet stay-awake 2>/dev/null && sa_on=1
+hs_on=0; hs_txt="off"
+if nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx Hotspot; then
+  hs_on=1; n=$(iw dev @WIFI@ station dump 2>/dev/null | grep -c '^Station')
+  hs_txt="on · $n device$([ "$n" = 1 ] || echo s)"
+fi
+line="  $(chip awake "$([ $sa_on = 1 ] && echo on || echo off)" $sa_on)   $(chip hotspot "$hs_txt" $hs_on)"
+
+wf="$cache/weather"
+if [ ! -f "$wf" ] || [ $(( $(date +%s) - $(stat -c %Y "$wf") )) -gt 1800 ]; then
+  ( w=$(curl -s -m 5 'https://wttr.in/?format=%t+%C' 2>/dev/null)
+    case "$w" in *Unknown*|*html*|"") ;; *) echo "$w" > "$wf" ;; esac ) >/dev/null 2>&1 & disown
+fi
+[ -s "$wf" ] && line="$line   ${SAGE}◌${R} ${WARM}$(tr 'A-Z' 'a-z' < "$wf" | sed 's/^+//')${R}"
+echo "$line"
+
+# Quote
+q="$HOME/.config/welcome/quotes.txt"
+if [ -s "$q" ]; then
+  quote=$(shuf -n1 "$q")
+  text=${quote% — *}; who=""; [ "$text" != "$quote" ] && who=${quote##* — }
+  printf '\n  %s%s“%s”%s' "$DIM" "$IT" "$text" "$R"
+  [ -n "$who" ] && printf '  %s— %s%s' "$DARK" "$who" "$R"
+  echo
+fi
+echo

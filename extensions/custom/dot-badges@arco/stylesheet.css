@@ -1,0 +1,23 @@
+/* "I Found You" notification dot: a small ember in the exact crimson of the
+   wallpaper's light (#b1444d core fading to #7a2024), with a soft foggy glow.
+   The count stays but is invisible. */
+#dashtodockContainer StLabel.notification-badge,
+.overview-tile StLabel.notification-badge,
+.icon-grid StLabel.notification-badge {
+  color: transparent;
+  width: 7px;
+  height: 7px;
+  min-width: 7px;
+  min-height: 7px;
+  max-width: 7px;
+  max-height: 7px;
+  padding: 0;
+  margin: 5px 5px 0 0;
+  border-radius: 99px;
+  background-color: #b1444d;
+  background-gradient-direction: vertical;
+  background-gradient-start: #d0606a;
+  background-gradient-end: #8e2a32;
+  border: 1px solid rgba(14, 12, 12, 0.9);
+  box-shadow: 0 0 9px 2px rgba(177, 68, 77, 0.55);
+}

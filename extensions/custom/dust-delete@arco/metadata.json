@@ -1,0 +1,7 @@
+{
+  "uuid": "dust-delete@arco",
+  "name": "Dust Delete",
+  "description": "When you move a file to the Trash from Files, it crumbles into dust and drifts away, like deleting a message in Telegram.",
+  "shell-version": ["50", "51"],
+  "version": 3
+}

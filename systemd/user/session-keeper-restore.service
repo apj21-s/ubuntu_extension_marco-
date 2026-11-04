@@ -1,0 +1,12 @@
+[Unit]
+Description=Offer to reopen apps from before the restart
+After=graphical-session.target
+
+[Service]
+KillMode=process
+Type=oneshot
+ExecStartPre=/bin/sleep 20
+ExecStart=%h/.local/bin/session-keeper restore --ask
+
+[Install]
+WantedBy=default.target

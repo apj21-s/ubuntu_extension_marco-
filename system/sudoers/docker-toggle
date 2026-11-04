@@ -1,0 +1,2 @@
+# Let @USER@ start/stop Docker from the Quick Settings button without a password.
+@USER@ ALL=(root) NOPASSWD: /usr/bin/snap start docker.dockerd, /usr/bin/snap stop docker.dockerd

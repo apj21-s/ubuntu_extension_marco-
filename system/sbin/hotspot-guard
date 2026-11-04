@@ -1,0 +1,96 @@
+#!/bin/bash
+# Hotspot guard: alerts when a new device joins the "Hotspot" connection,
+# with Allow / Kick / Block buttons.
+# Usage: hotspot-guard run | list | unblock <MAC> | untrust <MAC>
+IFACE=@WIFI@
+CONN=Hotspot
+USER_NAME=@USER@
+USER_ID=@UID@
+DIR=/etc/hotspot-guard
+RUN=/run/hotspot-guard
+LEASES=/var/lib/NetworkManager/dnsmasq-$IFACE.leases
+mkdir -p "$DIR" "$RUN/pending"; touch "$DIR/trusted" "$DIR/blocked" "$RUN/seen"
+
+valid_mac() { [[ "$1" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]]; }
+stations() { iw dev "$IFACE" station dump 2>/dev/null | awk '/^Station/{print tolower($2)}'; }
+lease_info() {  # prints "name ip"
+  awk -v m="$1" 'tolower($2)==m{print ($4=="*"?"Unknown-device":$4), $3}' "$LEASES" 2>/dev/null | tail -1
+}
+setup_nft() {
+  nft -f - <<NFT
+table inet hotspot_guard
+delete table inet hotspot_guard
+table inet hotspot_guard {
+  set blocked { type ether_addr; }
+  chain input   { type filter hook input   priority -10; iifname "$IFACE" ether saddr @blocked drop; }
+  chain forward { type filter hook forward priority -10; iifname "$IFACE" ether saddr @blocked drop; }
+}
+NFT
+  while read -r m; do valid_mac "$m" && nft add element inet hotspot_guard blocked "{ $m }"; done < "$DIR/blocked"
+}
+notify_user() {  # plain info notification (no buttons)
+  [ -S /run/user/$USER_ID/bus ] || return 1
+  runuser -u "$USER_NAME" -- env DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/$USER_ID \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_ID/bus @HOME@/.local/bin/notify -a "Hotspot Guard" "$@"
+}
+kick() { iw dev "$IFACE" station del "$1" 2>/dev/null; }
+block() {
+  grep -qx "$1" "$DIR/blocked" || echo "$1" >> "$DIR/blocked"
+  nft add element inet hotspot_guard blocked "{ $1 }" 2>/dev/null
+  kick "$1"
+}
+ask() {  # runs in background per new device
+  mac=$1; read -r name ip <<< "$(lease_info "$mac")"
+  sleep 4; [ -z "$name" ] && read -r name ip <<< "$(lease_info "$mac")"   # give DHCP a moment
+  name=${name:-Unknown-device}
+  [ -S /run/user/$USER_ID/bus ] || { rm -f "$RUN/pending/$mac"; return; }
+  choice=$(runuser -u "$USER_NAME" -- env XDG_RUNTIME_DIR=/run/user/$USER_ID \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_ID/bus \
+    /usr/local/sbin/hotspot-guard-notify "New device on your hotspot" \
+    "$name  ${ip:+($ip)}"$'\n'"$mac" network-wireless-hotspot-symbolic \
+    allow=Allow kick=Kick block=Block)
+  case "$choice" in
+    allow) echo "$mac" >> "$DIR/trusted"; notify_user -i emblem-ok-symbolic "Trusted: $name" "It won't be reported again." ;;
+    kick)  kick "$mac";  notify_user -i network-wireless-hotspot-symbolic "Kicked: $name" "It was disconnected (it can rejoin)." ;;
+    block) block "$mac"; notify_user -i action-unavailable-symbolic "Blocked: $name" "No internet for it on your hotspot. Undo: hotspot-devices unblock $mac" ;;
+  esac
+  rm -f "$RUN/pending/$mac"
+}
+
+case "${1:-run}" in
+  run)
+    setup_nft
+    while true; do
+      if nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx "$CONN"; then
+        for mac in $(stations); do
+          if grep -qx "$mac" "$DIR/blocked"; then kick "$mac"; continue; fi
+          grep -qx "$mac" "$DIR/trusted" && continue
+          grep -qx "$mac" "$RUN/seen" && continue
+          echo "$mac" >> "$RUN/seen"; touch "$RUN/pending/$mac"
+          ask "$mac" &
+        done
+      else
+        : > "$RUN/seen"   # hotspot off: ask again next time unknown devices join
+      fi
+      sleep 3
+    done ;;
+  list)
+    echo "Connected now:"
+    for mac in $(stations); do
+      read -r name ip <<< "$(lease_info "$mac")"
+      tag=""; grep -qx "$mac" "$DIR/trusted" && tag="(trusted)"
+      printf '  %-20s %-16s %s %s\n' "${name:-Unknown-device}" "${ip:--}" "$mac" "$tag"
+    done
+    echo "Trusted:"; sed 's/^/  /' "$DIR/trusted"
+    echo "Blocked:"; sed 's/^/  /' "$DIR/blocked" ;;
+  unblock)
+    m=$(echo "$2" | tr A-Z a-z); valid_mac "$m" || { echo "Not a MAC address: $2"; exit 2; }
+    sed -i "\|^$m\$|d" "$DIR/blocked"
+    nft delete element inet hotspot_guard blocked "{ $m }" 2>/dev/null
+    sed -i "\|^$m\$|d" "$RUN/seen"
+    echo "Unblocked $m" ;;
+  untrust)
+    m=$(echo "$2" | tr A-Z a-z); valid_mac "$m" || { echo "Not a MAC address: $2"; exit 2; }
+    sed -i "\|^$m\$|d" "$DIR/trusted"; echo "Removed $m from trusted" ;;
+  *) echo "Usage: hotspot-guard run|list|unblock MAC|untrust MAC"; exit 2 ;;
+esac

@@ -1,0 +1,9 @@
+/* Focus Mode indicator styling.
+ * The Quick Settings tile itself (grey OFF / accent ON) is handled
+ * natively by GNOME Shell's QuickToggle base class via toggleMode.
+ * This stylesheet only fine-tunes the top-panel indicator icon.
+ */
+
+.focus-mode-panel-icon {
+    -st-icon-style: symbolic;
+}

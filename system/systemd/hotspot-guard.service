@@ -1,0 +1,12 @@
+[Unit]
+Description=Hotspot guard (alerts on new hotspot devices)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/sbin/hotspot-guard run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

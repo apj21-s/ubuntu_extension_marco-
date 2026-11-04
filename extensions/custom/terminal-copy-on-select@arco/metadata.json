@@ -1,0 +1,7 @@
+{
+  "uuid": "terminal-copy-on-select@arco",
+  "name": "Terminal Copy on Select",
+  "description": "Selecting text in a terminal copies it to the clipboard automatically (Ctrl+V / Ctrl+Shift+V to paste).",
+  "shell-version": ["50", "51"],
+  "version": 1
+}

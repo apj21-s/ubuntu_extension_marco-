@@ -1,0 +1,40 @@
+#!/bin/bash
+# Windows-style Refresh: quick flash + light checks that keep things running smoothly.
+"$HOME/.local/bin/refresh-flash" >/dev/null 2>&1 &
+report=(); problems=0
+
+# 1. Refresh app list and icons (new apps show up, broken icons redraw).
+if update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null; then
+  report+=("✔ App list & icons: refreshed")
+else
+  report+=("✖ App list & icons: refresh failed"); problems=1
+fi
+[ -f "$HOME/.local/share/icons/hicolor/index.theme" ] && gtk-update-icon-cache -q -f "$HOME/.local/share/icons/hicolor" 2>/dev/null
+
+# 2. Sound: fix only if broken.
+if grep -q sof /proc/asound/cards 2>/dev/null && [ "$(pactl get-default-sink 2>/dev/null)" != "auto_null" ]; then
+  report+=("✔ Sound: working")
+else
+  r=$("$HOME/.local/bin/fix-audio" --quiet 2>/dev/null)
+  case "$r" in
+    fixed*) report+=("🛠 Sound: was broken, ${r}") ;;
+    *)      report+=("✖ Sound: ${r:-FAILED to fix - restart the laptop}"); problems=1 ;;
+  esac
+fi
+
+# 3. Internet check.
+if curl -s -m 4 -o /dev/null https://connectivitycheck.gstatic.com/generate_204; then
+  report+=("✔ Internet: connected")
+else
+  report+=("✖ Internet: not connected - check Wi-Fi/LAN"); problems=1
+fi
+
+# 4. Health line.
+ram=$(free -m | awk '/Mem/{printf "%d%%", ($2-$7)*100/$2}')
+disk=$(df / | awk 'NR==2{print $5}')
+temp=$(sensors 2>/dev/null | awk '/Package id 0/{print $4; exit}')
+report+=("ℹ RAM ${ram} · Disk ${disk}${temp:+ · CPU $temp}")
+
+title="Refreshed 🛠"; [ $problems -eq 1 ] && title="Refreshed 🛠 - needs attention"
+sleep 0.6
+NOTIFY_SECONDS=10 "$HOME/.local/bin/notify" -i view-refresh-symbolic "$title" "$(printf '%s\n' "${report[@]}")"

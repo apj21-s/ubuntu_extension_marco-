@@ -1,0 +1,8 @@
+[Sound Theme]
+Name=I Found You
+Comment=Soft, minimal sounds (made for this laptop)
+Inherits=freedesktop
+Directories=stereo
+
+[stereo]
+OutputProfile=stereo

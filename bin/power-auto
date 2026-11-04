@@ -1,0 +1,49 @@
+#!/bin/bash
+# Battery-smart power mode: Power Saver on battery, Balanced on charger.
+# Also warns when Stay Awake is keeping the laptop on with a low battery.
+last=""
+warned=0
+# The music pill's real-time visualizer costs ~15% CPU (measured 2026-11-03).
+# On battery: remember the user's style and turn it off. On charger: put it back.
+PILL_SCHEMA="--schemadir $HOME/.local/share/gnome-shell/extensions/dynamic-music-pill@andbal/schemas org.gnome.shell.extensions.dynamic-music-pill"
+SAVED="$HOME/.config/power-auto/visualizer-style.saved"
+visuals() {
+  if [ "$1" = "true" ]; then
+    cur=$(gsettings $PILL_SCHEMA get visualizer-style 2>/dev/null) || return
+    if [ "$cur" != "0" ]; then
+      mkdir -p "$(dirname "$SAVED")"; echo "$cur" > "$SAVED"
+      gsettings $PILL_SCHEMA set visualizer-style 0
+    fi
+  elif [ -f "$SAVED" ]; then
+    gsettings $PILL_SCHEMA set visualizer-style "$(cat "$SAVED")" && rm -f "$SAVED"
+  fi
+}
+apply() {
+  on_bat=$(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower OnBattery 2>/dev/null | awk '{print $2}')
+  if [ -n "$on_bat" ] && [ "$on_bat" != "$last" ]; then
+    if [ "$on_bat" = "true" ]; then want=power-saver; else want=balanced; fi
+    # Right after login the switch can be refused ("Not Authorized"); retry until it sticks.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      powerprofilesctl set "$want" 2>/dev/null
+      [ "$(powerprofilesctl get)" = "$want" ] && break
+      sleep 3
+    done
+    visuals "$on_bat"
+    echo "OnBattery=$on_bat -> $(powerprofilesctl get)"
+    # Only remember it if it worked, so the next check tries again otherwise.
+    [ "$(powerprofilesctl get)" = "$want" ] && last=$on_bat
+  fi
+  pct=$(busctl get-property org.freedesktop.UPower /org/freedesktop/UPower/devices/DisplayDevice org.freedesktop.UPower.Device Percentage 2>/dev/null | awk '{printf "%d", $2}')
+  if [ "$on_bat" = "true" ] && [ -n "$pct" ] && [ "$pct" -lt 15 ] && systemctl --user is-active --quiet stay-awake; then
+    if [ $warned -eq 0 ]; then
+      notify-send -u critical -i battery-caution-symbolic "Plug in the charger" "Battery is at ${pct}% and Stay Awake is keeping the laptop on."
+      warned=1
+    fi
+  else
+    warned=0
+  fi
+}
+apply
+# React to charger plug/unplug instantly; re-check battery every 2 minutes.
+( gdbus monitor --system --dest org.freedesktop.UPower --object-path /org/freedesktop/UPower 2>/dev/null & while sleep 120; do echo tick; done ) |
+while read -r _; do apply; done

@@ -1,0 +1,3 @@
+#!/bin/bash
+# Refuse any commit that would publish something private (see tools/check-leaks.py).
+exec python3 -I "$(git rev-parse --show-toplevel)/tools/check-leaks.py" --staged

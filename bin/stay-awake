@@ -1,0 +1,23 @@
+#!/bin/bash
+# Stay Awake mode: stops the laptop from sleeping (idle timer or lid close)
+# so things like the mobile hotspot keep running. Usage: stay-awake on|off|status
+UNIT=stay-awake
+case "$1" in
+  on)
+    systemctl --user is-active --quiet "$UNIT" && exit 0
+    systemd-run --user --unit="$UNIT" --description="Stay Awake mode" --quiet \
+      systemd-inhibit --what=sleep:idle:handle-lid-switch --mode=block \
+        --who="Stay Awake" --why="Keeping the laptop (and hotspot) running" \
+      gnome-session-inhibit --inhibit suspend:idle --reason "Stay Awake mode" \
+        --inhibit-only || exit 1
+    sleep 1
+    systemctl --user is-active --quiet "$UNIT" || exit 1
+    "$HOME/.local/bin/notify" -i weather-clear-symbolic "Stay Awake ON" "Laptop will not sleep, even with the lid closed." ;;
+  off)
+    systemctl --user stop "$UNIT" 2>/dev/null
+    systemctl --user reset-failed "$UNIT" 2>/dev/null
+    "$HOME/.local/bin/notify" -i weather-clear-night-symbolic "Stay Awake OFF" "Normal sleep settings are back." ;;
+  status)
+    systemctl --user is-active "$UNIT" ;;
+  *) echo "Usage: stay-awake on|off|status"; exit 2 ;;
+esac

@@ -1,0 +1,7 @@
+{
+  "uuid": "dot-badges@arco",
+  "name": "Dot Badges",
+  "description": "Shows a small red dot instead of a number when an app in the dock has notifications (Android style).",
+  "shell-version": ["50", "51"],
+  "version": 1
+}

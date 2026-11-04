@@ -1,0 +1,10 @@
+[Unit]
+Description=Save session every 2 minutes
+
+[Timer]
+OnStartupSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

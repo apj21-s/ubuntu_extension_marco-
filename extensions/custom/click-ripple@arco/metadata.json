@@ -1,0 +1,7 @@
+{
+  "uuid": "click-ripple@arco",
+  "name": "Click Ripple",
+  "description": "A soft crimson ring ripples out from the pointer on every click (white for right click), with a small dot while the button is held.",
+  "shell-version": ["50", "51"],
+  "version": 1
+}

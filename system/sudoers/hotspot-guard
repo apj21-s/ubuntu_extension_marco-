@@ -1,0 +1,2 @@
+# Let @USER@ list devices and undo blocks without a password.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/hotspot-guard list, /usr/local/sbin/hotspot-guard unblock *, /usr/local/sbin/hotspot-guard untrust *

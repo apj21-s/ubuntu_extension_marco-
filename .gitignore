@@ -1,0 +1,19 @@
+# Never published: media, local-only config, anything secret-looking
+*.mp4
+*.mkv
+*.webm
+config/background*
+local.conf
+private-words
+*.pem
+*.key
+*.p12
+*.pfx
+*.ovpn
+*.nmconnection
+.env
+.env.*
+*.keyring
+prefs
+__pycache__/
+*.pyc

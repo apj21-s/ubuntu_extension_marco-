@@ -1,0 +1,73 @@
+#!/bin/bash
+# Send copied text / an error / text from the screen to ChatGPT in Brave.
+# Usage: ask-chatgpt ask | error | screen
+MAX=6000
+say() { "$HOME/.local/bin/notify" -i dialog-information-symbolic "$1" "$2"; }
+
+open_chatgpt() {
+  local url
+  url="https://chatgpt.com/?q=$(printf '%s' "$1" | python3 -I -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))')"
+  brave-browser --new-tab "$url" >/dev/null 2>&1 &
+}
+
+trim() { local t="$1"; [ ${#t} -gt $MAX ] && t="${t:0:$MAX}
+...(cut, text was too long)"; printf '%s' "$t"; }
+
+pick_action() {  # optional $1 = extra first option
+  local opts=()
+  [ -n "$1" ] && opts+=("$1")
+  zenity --list --title="Ask ChatGPT" --text="What should ChatGPT do with this text?" \
+    --column="Action" --hide-header --width=360 --height=330 \
+    "${opts[@]}" "Explain it simply" "Summarize it" "Translate to Hindi" "Translate to English" \
+    "Fix grammar and rewrite better" "Ask my own question..." 2>/dev/null
+}
+
+build_prompt() {  # $1 action, $2 text
+  case "$1" in
+    "Answer / solve this")  echo "Answer or solve this. Show the steps clearly:" ;;
+    "Explain it simply")    echo "Explain this in simple words:" ;;
+    "Summarize it")         echo "Summarize this in short bullet points:" ;;
+    "Translate to Hindi")   echo "Translate this to Hindi:" ;;
+    "Translate to English") echo "Translate this to English:" ;;
+    "Fix grammar and rewrite better") echo "Fix the grammar and rewrite this better, keeping the meaning:" ;;
+    "Ask my own question...")
+      q=$(zenity --entry --title="Ask ChatGPT" --text="Your question about this text:" --width=420 2>/dev/null) || return 1
+      [ -n "$q" ] || return 1; echo "$q" ;;
+    *) return 1 ;;
+  esac
+}
+
+case "$1" in
+  ask)
+    text=$(wl-paste --no-newline 2>/dev/null)
+    [ -n "$(echo "$text" | tr -d '[:space:]')" ] || { say "Clipboard is empty" "Copy some text first (Ctrl+C), then press Windows+Shift+C."; exit 1; }
+    action=$(pick_action "") || exit 0
+    instr=$(build_prompt "$action") || exit 0
+    open_chatgpt "$instr
+
+\"\"\"
+$(trim "$text")
+\"\"\"" ;;
+  error)
+    text=$(wl-paste --no-newline 2>/dev/null)
+    [ -n "$(echo "$text" | tr -d '[:space:]')" ] || { say "Clipboard is empty" "Copy the error first (Ctrl+C or Ctrl+Shift+C in terminal), then press Windows+Shift+E."; exit 1; }
+    open_chatgpt "I got this error on Ubuntu Linux. Explain in simple words what caused it and give me the exact steps to fix it:
+
+\`\`\`
+$(trim "$text")
+\`\`\`" ;;
+  screen)
+    shot=$("$HOME/.local/bin/screen-area")
+    [ -n "$shot" ] && [ -s "$shot" ] || exit 0
+    text=$(tesseract "$shot" - -l eng --psm 6 2>/dev/null | sed -e 's/[[:space:]]*$//' -e '/./,$!d')
+    rm -f -- "$shot"
+    [ -n "$(echo "$text" | tr -d '[:space:]')" ] || { say "No text found" "Select an area that has text in it."; exit 1; }
+    action=$(pick_action "Answer / solve this") || exit 0
+    instr=$(build_prompt "$action") || exit 0
+    open_chatgpt "$instr (This text was read from my screen with OCR, so small mistakes are possible.)
+
+\"\"\"
+$(trim "$text")
+\"\"\"" ;;
+  *) echo "Usage: ask-chatgpt ask|error|screen"; exit 2 ;;
+esac

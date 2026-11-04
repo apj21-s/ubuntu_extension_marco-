@@ -1,0 +1,12 @@
+[Unit]
+Description=Pause music on headphone unplug, resume on plug-in
+After=pipewire-pulse.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/.local/bin/headphone-magic
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

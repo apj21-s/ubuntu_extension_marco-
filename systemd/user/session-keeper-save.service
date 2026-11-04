@@ -1,0 +1,6 @@
+[Unit]
+Description=Save open apps, folders and terminal tabs
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/session-keeper save

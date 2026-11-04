@@ -1,0 +1,240 @@
+#!/usr/bin/python3 -I
+"""Save open apps, folders and terminal tabs; reopen them after a restart.
+
+Usage:
+  session-keeper save            snapshot what's open now (runs every 2 min)
+  session-keeper restore         reopen the last session from before the restart
+  session-keeper restore --ask   same, but first ask with a notification
+  session-keeper show            print what would be restored
+"""
+import glob, json, os, re, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+STATE = os.path.join(HOME, ".local/state/session-keeper")
+CURRENT = os.path.join(STATE, "current.json")
+PREVIOUS = os.path.join(STATE, "previous.json")
+CGROUP = "/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service" % (os.getuid(), os.getuid())
+APP_DIRS = [os.path.join(HOME, ".local/share/applications"), "/usr/share/applications",
+            "/var/lib/snapd/desktop/applications", "/usr/local/share/applications",
+            os.path.join(HOME, ".local/share/flatpak/exports/share/applications"),
+            "/var/lib/flatpak/exports/share/applications"]
+# Background helpers that should never be "restored".
+SKIP = re.compile(r"(ocr-copy|ask-chatgpt|fix-audio|update-notifier|SettingsDaemon|"
+                  r"xdg-terminal-exec|org\.gnome\.Shell|gnome-session|evolution-alarm|"
+                  r"org\.gnome\.Ptyxis|ptyxis|claude|tracker|localsearch|nautilus|"
+                  r"org\.gnome\.Nautilus|snapd|ubuntu-advantage|session-keeper)", re.I)
+
+
+def boot_id():
+    return open("/proc/sys/kernel/random/boot_id").read().strip()
+
+
+def desktop_path(app_id):
+    for d in APP_DIRS:
+        p = os.path.join(d, app_id + ".desktop")
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def launchable(path):
+    try:
+        text = open(path, errors="ignore").read()
+    except OSError:
+        return False
+    return not re.search(r"^(NoDisplay|Hidden)\s*=\s*true", text, re.M | re.I)
+
+
+def unescape(s):
+    return re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
+
+
+def running_scopes():
+    out = subprocess.run(["systemctl", "--user", "list-units", "--type=scope", "--state=running",
+                          "--no-legend", "--plain"], capture_output=True, text=True).stdout
+    return [line.split()[0] for line in out.splitlines() if line.strip()]
+
+
+def scope_pids(unit):
+    hits = glob.glob(os.path.join(CGROUP, "**", unit, "cgroup.procs"), recursive=True)
+    if not hits:
+        return []
+    try:
+        return [int(x) for x in open(hits[0]).read().split()]
+    except OSError:
+        return []
+
+
+def collect():
+    apps, terminals = [], []
+    for unit in running_scopes():
+        name = unescape(unit)
+        if name.startswith("ptyxis-spawn-"):
+            for pid in scope_pids(unit)[:1]:
+                try:
+                    cwd = os.readlink("/proc/%d/cwd" % pid)
+                except OSError:
+                    continue
+                if os.path.isdir(cwd):
+                    terminals.append(cwd)
+            continue
+        m = (re.match(r"app-(?:gnome|flatpak)-(.+?)-(?:restore)?\d+\.scope$", name)
+             or re.match(r"app-(?:gnome|flatpak)-(.+)@[0-9a-f]+\.scope$", name))
+        app_id = m.group(1) if m else None
+        if not app_id:
+            m = re.match(r"snap\.([^.]+)\.([^.]+?)(?:-[0-9a-f-]{8,})?\.scope$", name)
+            if m:
+                app_id = "%s_%s" % (m.group(1), m.group(2))
+        if not app_id or SKIP.search(app_id):
+            continue
+        path = desktop_path(app_id)
+        if path and launchable(path) and app_id not in apps:
+            apps.append(app_id)
+    folders = []
+    try:
+        out = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+             "--object-path", "/org/freedesktop/FileManager1", "--method",
+             "org.freedesktop.DBus.Properties.Get", "org.freedesktop.FileManager1",
+             "OpenWindowsWithLocations"], capture_output=True, text=True, timeout=5).stdout
+        # Each window maps to a list of tab locations; keep the first location per window.
+        for tabs in re.findall(r"\[([^\]]*)\]", out):
+            uris = re.findall(r"'([^']+)'", tabs)
+            if uris and uris[0] not in folders:
+                folders.append(uris[0])
+    except Exception:
+        pass
+    return {"boot_id": boot_id(), "time": int(time.time()),
+            "apps": apps, "folders": folders, "terminals": terminals}
+
+
+def load(path):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return None
+
+
+def save():
+    os.makedirs(STATE, exist_ok=True)
+    old = load(CURRENT)
+    # First save after a restart: keep the old session for restoring.
+    if old and old.get("boot_id") != boot_id():
+        os.replace(CURRENT, PREVIOUS)
+    snap = collect()
+    if not (snap["apps"] or snap["folders"] or snap["terminals"]):
+        return  # nothing open yet; don't overwrite a good snapshot
+    tmp = CURRENT + ".tmp"
+    json.dump(snap, open(tmp, "w"), indent=1)
+    os.replace(tmp, CURRENT)
+
+
+def last_session():
+    cur = load(CURRENT)
+    if cur and cur.get("boot_id") != boot_id():
+        return cur
+    return load(PREVIOUS)
+
+
+def summary(s):
+    names = [a.split("_")[-1].replace("org.gnome.", "").replace("-", " ") for a in s["apps"]]
+    parts = []
+    if names:
+        parts.append(", ".join(names[:6]) + (" +%d more" % (len(names) - 6) if len(names) > 6 else ""))
+    if s["folders"]:
+        parts.append("%d folder%s" % (len(s["folders"]), "" if len(s["folders"]) == 1 else "s"))
+    if s["terminals"]:
+        parts.append("%d terminal tab%s" % (len(s["terminals"]), "" if len(s["terminals"]) == 1 else "s"))
+    return "; ".join(parts)
+
+
+def notify(title, body, *actions):
+    helper = "/usr/local/sbin/hotspot-guard-notify"
+    if actions and os.path.exists(helper):
+        r = subprocess.run([helper, title, body, "view-refresh-symbolic", *actions],
+                           capture_output=True, text=True)
+        return r.stdout.strip()
+    subprocess.run([os.path.join(HOME, ".local/bin/notify"), "-i", "view-refresh-symbolic", title, body])
+    return ""
+
+
+def restore(ask):
+    save()  # moves the pre-restart session aside before reading it
+    s = last_session()
+    if not s or not (s["apps"] or s["folders"] or s["terminals"]):
+        if not ask:
+            notify("Nothing to restore", "No saved session from before the last restart.")
+        return
+    if ask:
+        if notify("Restore your last session?", summary(s),
+                  "restore=Restore", "skip=Not now") != "restore":
+            return
+    running = collect()["apps"]
+    wanted = []
+    for app in s["apps"]:
+        if app in running:
+            continue
+        path = desktop_path(app)
+        if path:
+            launch(["gio", "launch", path], app)
+            wanted.append(app)
+            time.sleep(0.7)
+    for uri in s["folders"]:
+        launch(["nautilus", "--new-window", uri], "org.gnome.Nautilus")
+    terms = [t for t in s["terminals"] if os.path.isdir(t)]
+    for i, cwd in enumerate(terms):
+        launch(["ptyxis", "--new-window" if i == 0 else "--tab", "-d", cwd], "org.gnome.Ptyxis")
+        time.sleep(1.5 if i == 0 else 0.3)
+    # Don't offer the same session again.
+    if os.path.exists(PREVIOUS):
+        os.replace(PREVIOUS, PREVIOUS + ".used")
+    # Report what actually came back.
+    time.sleep(6)
+    now = collect()["apps"]
+    ok = [pretty(a) for a in wanted if a in now]
+    failed = [pretty(a) for a in wanted if a not in now]
+    lines = []
+    if ok:
+        lines.append("✔ Reopened: " + ", ".join(ok))
+    if s["folders"]:
+        lines.append("✔ %d folder window%s" % (len(s["folders"]), "" if len(s["folders"]) == 1 else "s"))
+    if terms:
+        lines.append("✔ %d terminal tab%s" % (len(terms), "" if len(terms) == 1 else "s"))
+    if failed:
+        lines.append("✖ Didn't open: " + ", ".join(failed))
+    if not lines:
+        lines.append("Everything from last time was already open.")
+    notify("Session restored 🛠" if not failed else "Session restored 🛠 - some apps failed",
+           "\n".join(lines))
+
+
+def pretty(app_id):
+    return app_id.split("_")[-1].replace("org.gnome.", "").replace("-", " ")
+
+
+def launch(cmd, app_id):
+    """Start a program in its own scope so it keeps running after this job ends."""
+    esc = subprocess.run(["systemd-escape", app_id], capture_output=True, text=True).stdout.strip()
+    unit = "app-gnome-%s-restore%d.scope" % (esc or "app", int(time.time() * 1000) % 10**9)
+    subprocess.Popen(["systemd-run", "--user", "--scope", "--collect", "--quiet",
+                      "--unit=" + unit, "--", *cmd],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "save":
+        save()
+    elif cmd == "restore":
+        restore("--ask" in sys.argv)
+    elif cmd == "show":
+        print("Saved now  :", json.dumps(load(CURRENT), indent=1))
+        s = last_session()
+        print("Would restore:", summary(s) if s else "nothing")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

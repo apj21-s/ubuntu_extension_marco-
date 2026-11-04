@@ -1,0 +1,33 @@
+#!/bin/bash
+# Sort files in ~/Downloads into folders. Usage: organize-downloads [--dry-run]
+DL="$HOME/Downloads"; DRY=0; [ "$1" = "--dry-run" ] && DRY=1
+shopt -s nullglob nocaseglob
+folder_for() {
+  case "${1,,}" in
+    *.pdf) echo PDFs ;;
+    *.doc|*.docx|*.odt|*.txt|*.md|*.rtf|*.xls|*.xlsx|*.ods|*.csv|*.ppt|*.pptx|*.odp|*.epub) echo Documents ;;
+    *.jpg|*.jpeg|*.png|*.gif|*.webp|*.svg|*.bmp|*.heic|*.avif|*.ico) echo Images ;;
+    *.mp4|*.mkv|*.webm|*.avi|*.mov|*.flv|*.m4v) echo Videos ;;
+    *.mp3|*.wav|*.flac|*.ogg|*.m4a|*.aac|*.opus) echo Music ;;
+    *.zip|*.tar|*.gz|*.tgz|*.xz|*.bz2|*.7z|*.rar|*.zst) echo Archives ;;
+    *.deb|*.appimage|*.exe|*.msi|*.rpm|*.snap|*.flatpakref|*.run|*.apk) echo Installers ;;
+    *.py|*.js|*.ts|*.java|*.c|*.cpp|*.h|*.sh|*.json|*.html|*.css|*.ipynb|*.go|*.rs|*.sql|*.xml|*.yaml|*.yml) echo Code ;;
+  esac
+}
+now=$(date +%s)
+for f in "$DL"/*; do
+  [ -f "$f" ] || continue
+  name=$(basename "$f")
+  case "${name,,}" in *.part|*.crdownload|*.tmp|*.download|.*) continue ;; esac
+  [ $(( now - $(stat -c %Y "$f") )) -lt 120 ] && continue   # still downloading / just arrived
+  dest=$(folder_for "$name"); [ -z "$dest" ] && continue
+  target="$DL/$dest/$name"; n=1
+  while [ -e "$target" ]; do target="$DL/$dest/${name%.*}-$n.${name##*.}"; n=$((n+1)); done
+  if [ $DRY -eq 1 ]; then echo "$name -> $dest/"; else mkdir -p "$DL/$dest"; mv -n -- "$f" "$target"; fi
+done
+# Installers older than 30 days go to Trash (recoverable).
+if [ -d "$DL/Installers" ]; then
+  find "$DL/Installers" -maxdepth 1 -type f -mtime +30 -print0 | while IFS= read -r -d '' old; do
+    if [ $DRY -eq 1 ]; then echo "$(basename "$old") -> Trash (older than 30 days)"; else gio trash -- "$old"; fi
+  done
+fi

@@ -1,0 +1,60 @@
+#!/bin/bash
+# Fix sound when it stops working (e.g. "Dummy Output").
+# Usage: fix-audio        (manual, shows notifications)
+#        fix-audio --auto (at login: only acts if sound is broken)
+#        fix-audio --quiet (used by refresh: prints the result)
+#
+# Safe by design: it only restarts the sound *software*. If the sound card itself
+# failed to start at boot, the only safe fix is a restart, so it offers one.
+AUTO=0; [ "$1" = "--auto" ] && AUTO=1
+QUIET=0; [ "$1" = "--quiet" ] && QUIET=1
+LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/fix-audio.lock"
+exec 9>"$LOCK"
+flock -n 9 || { [ $QUIET -eq 1 ] && echo "already being fixed"; exit 0; }   # one fix at a time
+
+say() { [ $QUIET -eq 1 ] && return; "$HOME/.local/bin/notify" -i audio-speakers-symbolic "$1" "$2"; }
+result() { [ $QUIET -eq 1 ] && echo "$1"; }
+card_ok()  { grep -q sof /proc/asound/cards 2>/dev/null; }
+sound_ok() {
+  card_ok || return 1
+  s=$(pactl get-default-sink 2>/dev/null)
+  [ -n "$s" ] && [ "$s" != "auto_null" ]
+}
+restart_audio() {
+  systemctl --user restart pipewire.socket pipewire-pulse.socket 2>/dev/null
+  systemctl --user restart wireplumber pipewire pipewire-pulse
+  sleep 3
+}
+finish() {
+  # Prefer headphones if plugged in, otherwise laptop speakers; unmute.
+  sink=$(pactl list short sinks | awk '{print $2}' | grep -iE "headphone" | head -1)
+  [ -z "$sink" ] && sink=$(pactl list short sinks | awk '{print $2}' | grep -iE "speaker" | head -1)
+  [ -n "$sink" ] && pactl set-default-sink "$sink"
+  wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null
+  paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null &
+}
+offer_restart() {
+  result "sound card didn't start - restart needed"
+  [ $QUIET -eq 1 ] && return
+  choice=$(/usr/local/sbin/hotspot-guard-notify "Sound card didn't start 🔇" \
+    "This happens sometimes at boot. A restart fixes it. Save your work first." \
+    audio-volume-muted-symbolic restart=Restart later=Later 2>/dev/null)
+  [ "$choice" = "restart" ] && gnome-session-quit --reboot
+}
+
+if [ $AUTO -eq 1 ]; then
+  sleep 10
+  sound_ok && exit 0
+fi
+
+# The sound card itself is missing: software fixes can't help.
+if ! card_ok; then offer_restart; exit 1; fi
+
+[ $AUTO -eq 0 ] && say "Fixing sound..." "Restarting the sound system."
+restart_audio
+if sound_ok; then
+  finish; say "Sound fixed ✔" "Sound system restarted."; result "fixed (restarted sound system)"; exit 0
+fi
+say "Sound still not working" "Please restart the laptop."
+result "FAILED to fix - restart the laptop"
+exit 1

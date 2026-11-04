@@ -1,0 +1,38 @@
+#!/usr/bin/python3 -I
+# Show a desktop notification with buttons and print the chosen button's key.
+# Usage: hotspot-guard-notify TITLE BODY ICON key=Label [key=Label ...]
+import sys
+from gi.repository import Gio, GLib
+
+title, body, icon, *pairs = sys.argv[1:]
+actions = []
+for p in pairs:
+    k, _, label = p.partition("=")
+    actions += [k, label]
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+loop = GLib.MainLoop()
+state = {"id": None, "choice": ""}
+
+def on_signal(conn, sender, path, iface, signal, params):
+    args = params.unpack()
+    if args[0] != state["id"]:
+        return
+    if signal == "ActionInvoked":
+        state["choice"] = args[1]
+    loop.quit()
+
+for sig in ("ActionInvoked", "NotificationClosed"):
+    bus.signal_subscribe(None, "org.freedesktop.Notifications", sig,
+                         "/org/freedesktop/Notifications", None,
+                         Gio.DBusSignalFlags.NONE, on_signal)
+
+hints = {"urgency": GLib.Variant("y", 2), "resident": GLib.Variant("b", False)}
+res = bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications", "Notify",
+                    GLib.Variant("(susssasa{sv}i)", ("Hotspot Guard", 0, icon, title, body, actions, hints, 0)),
+                    None, Gio.DBusCallFlags.NONE, -1, None)
+state["id"] = res.unpack()[0]
+GLib.timeout_add_seconds(1800, loop.quit)   # give up after 30 min
+loop.run()
+print(state["choice"])

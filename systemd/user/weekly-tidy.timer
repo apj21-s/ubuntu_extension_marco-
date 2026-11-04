@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly personal tidy and report
+
+[Timer]
+OnCalendar=Sun 11:20
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=Weekly system tidy (unused packages, package cache)
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/sbin/weekly-tidy-root

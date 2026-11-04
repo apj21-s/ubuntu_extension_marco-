@@ -1,0 +1,11 @@
+[Unit]
+Description=Battery-smart power mode
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/power-auto
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

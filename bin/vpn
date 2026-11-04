@@ -1,0 +1,28 @@
+#!/bin/bash
+# VPN quick switch: vpn college | proton | off | next | status
+# Only one VPN runs at a time; switching to one turns the other off.
+# Name of your college/work VPN connection in NetworkManager (set by install.sh).
+COLLEGE="@VPN_NAME@"
+college_on()   { nmcli -t -f NAME connection show --active | grep -qx "$COLLEGE"; }
+proton_on() { timeout 20 protonvpn status 2>/dev/null | grep -q "Status: Connected"; }
+say() { "$HOME/.local/bin/notify" -i network-vpn-symbolic "$1" "$2"; }
+current() { if college_on; then echo college; elif proton_on; then echo proton; else echo off; fi; }
+
+case "$1" in
+  college)
+    proton_on && timeout 30 protonvpn disconnect >/dev/null 2>&1
+    if nmcli connection up "$COLLEGE" >/dev/null 2>&1; then say "College VPN connected" ""; else say "College VPN failed" "Check your college login or internet."; exit 1; fi ;;
+  proton)
+    college_on && nmcli connection down "$COLLEGE" >/dev/null 2>&1
+    out=$(timeout 90 "$HOME/.local/bin/protonvpn-slow" connect 2>&1)
+    if proton_on; then say "Proton VPN connected" "$(timeout 20 protonvpn status 2>/dev/null | grep -iE 'server|country' | head -2 | tr '\n' ' ')"
+    else say "Proton VPN failed" "$(echo "$out" | tail -1)"; exit 1; fi ;;
+  off)
+    college_on && nmcli connection down "$COLLEGE" >/dev/null 2>&1
+    proton_on && timeout 30 protonvpn disconnect >/dev/null 2>&1
+    say "VPN off" "" ;;
+  next)   # off -> college -> Proton -> off
+    case "$(current)" in off) "$0" college ;; college) "$0" proton ;; proton) "$0" off ;; esac ;;
+  status) echo "$(current)" ;;
+  *) echo "Usage: vpn college|proton|off|next|status"; exit 2 ;;
+esac

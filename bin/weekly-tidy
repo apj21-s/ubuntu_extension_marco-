@@ -1,0 +1,19 @@
+#!/bin/bash
+# Weekly personal tidy + short report (runs as you, after the system tidy).
+before=$(df --output=avail -B1M / | tail -1)
+command -v npm >/dev/null && npm cache clean --force >/dev/null 2>&1
+find "$HOME/.cache/thumbnails" -type f -atime +30 -delete 2>/dev/null
+find "$HOME/.cache/welcome" -type f -mtime +7 -delete 2>/dev/null
+after=$(df --output=avail -B1M / | tail -1)
+mine=$(( after - before )); sys=$(cat /var/lib/weekly-tidy/freed-mb 2>/dev/null || echo 0)
+total=$(( mine + sys ))
+free_gb=$(df -h --output=avail / | tail -1 | tr -d ' ')
+used=$(df --output=pcent / | tail -1 | tr -d ' ')
+bat=$(upower -i "$(upower -e | grep -m1 BAT)" 2>/dev/null | awk '/capacity:/{printf "%d%%", $2}')
+trash=$(du -sh "$HOME/.local/share/Trash" 2>/dev/null | cut -f1)
+msg="🧹 Freed ${total} MB this week
+💾 Disk: ${free_gb} free (${used} used)
+🔋 Battery health: ${bat:-?}"
+[ -n "$trash" ] && [ "$trash" != "0" ] && [ "$trash" != "4.0K" ] && msg="$msg
+🗑 Trash holds ${trash}"
+NOTIFY_SECONDS=15 "$HOME/.local/bin/notify" -i user-trash-full-symbolic "Weekly tidy done 🛠" "$msg"

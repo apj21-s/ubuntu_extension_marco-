@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface domain="blur-my-shell@aunetx">
+  <menu id="main_menu_model">
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Debug Logging</attribute>
+        <attribute name="action">prefs.debug</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Disable on Power Saver</attribute>
+        <attribute name="action">prefs.power-saver</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Reset Preferences…</attribute>
+        <attribute name="action">prefs.reset</attribute>
+      </item>
+    </section>
+    <section>
+      <item>
+        <attribute name="label" translatable="yes">Project page</attribute>
+        <attribute name="action">prefs.open-readme</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">Report a Bug</attribute>
+        <attribute name="action">prefs.open-bug-report</attribute>
+      </item>
+      <item>
+        <attribute name="label" translatable="yes">License</attribute>
+        <attribute name="action">prefs.open-license</attribute>
+      </item>
+    </section>
+  </menu>
+
+  <object class="GtkMenuButton" id="main_menu">
+    <property name="menu-model">main_menu_model</property>
+    <property name="icon-name">open-menu-symbolic</property>
+    <property name="primary">true</property>
+    <property name="tooltip-text" translatable="yes">Main Menu</property>
+  </object>
+
+  <object class="AdwPreferencesPage" id="menu_util"></object>
+</interface>

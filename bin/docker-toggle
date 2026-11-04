@@ -1,0 +1,12 @@
+#!/bin/bash
+# Docker on demand: docker-toggle on | off | status
+case "$1" in
+  on)  sudo -n /usr/bin/snap start docker.dockerd >/dev/null 2>&1 || { "$HOME/.local/bin/notify" -i dialog-error-symbolic "Docker didn't start" "Try again."; exit 1; }
+       for i in $(seq 30); do docker info >/dev/null 2>&1 && break; sleep 0.5; done   # wait until ready
+       if docker info >/dev/null 2>&1; then "$HOME/.local/bin/notify" -i system-run-symbolic "Docker started" "Ready to use."
+       else "$HOME/.local/bin/notify" -i dialog-warning-symbolic "Docker is still starting" "Give it a few more seconds."; fi ;;
+  off) sudo -n /usr/bin/snap stop docker.dockerd >/dev/null 2>&1
+       "$HOME/.local/bin/notify" -i system-shutdown-symbolic "Docker stopped" "Memory freed." ;;
+  status) snap services docker.dockerd 2>/dev/null | awk 'NR==2{print $3}' ;;
+  *) echo "Usage: docker-toggle on|off|status"; exit 2 ;;
+esac

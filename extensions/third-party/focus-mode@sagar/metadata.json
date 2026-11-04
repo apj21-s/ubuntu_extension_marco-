@@ -1,0 +1,14 @@
+{
+  "uuid": "focus-mode@sagar",
+  "name": "Focus Mode",
+  "description": "Adds a native Quick Settings toggle for Focus Mode, controlling Ambient Automation state stored in org.sagar.ambient (focus-mode key). Read by idle_monitor.py to gate automatic Ambient Mode triggering.",
+  "shell-version": [
+    "50",
+    "50.0",
+    "50.1"
+  ],
+  "url": "https://github.com/sagar/focus-mode-extension",
+  "version": 1,
+  "settings-schema": "org.sagar.ambient",
+  "gettext-domain": "focus-mode@sagar"
+}

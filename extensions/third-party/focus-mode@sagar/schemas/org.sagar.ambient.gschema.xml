@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="focus-mode@sagar">
+  <schema id="org.sagar.ambient" path="/org/sagar/ambient/">
+    <key name="focus-mode" type="b">
+      <default>false</default>
+      <summary>Focus Mode state</summary>
+      <description>
+        Whether Focus Mode (Ambient Automation gating) is enabled.
+        Read by idle_monitor.py to decide whether automatic Ambient
+        Mode triggering should proceed after user inactivity. This
+        value persists across reboot via dconf.
+      </description>
+    </key>
+  </schema>
+</schemalist>

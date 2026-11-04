@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Restore Last Session
+Comment=Reopen the apps, folders and terminal tabs from before the restart
+Exec=@HOME@/.local/bin/session-keeper restore
+Icon=view-refresh
+Terminal=false
+Type=Application
+Categories=Utility;
+Keywords=restore;session;reopen;apps;

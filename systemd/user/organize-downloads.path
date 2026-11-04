@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch ~/Downloads for new files
+
+[Path]
+PathChanged=%h/Downloads
+TriggerLimitIntervalSec=60
+
+[Install]
+WantedBy=default.target

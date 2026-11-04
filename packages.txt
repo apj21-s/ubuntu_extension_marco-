@@ -1,0 +1,72 @@
+# apt packages this setup uses (installed by system/install-system.sh)
+
+# desktop tools
+gnome-shell-extension-manager
+gnome-shell-extension-prefs
+gnome-tweaks
+gnome-system-monitor
+resources
+htop
+tree
+unzip
+zip
+wget
+
+# used by the scripts in bin/
+tesseract-ocr
+gnome-screenshot
+wl-clipboard
+zenity
+mpv
+python3-gi
+gir1.2-glib-2.0
+python3-cairo
+pulseaudio-utils
+iw
+nftables
+gnome-session-canberra
+curl
+
+# music pill visualizer
+cava
+
+# memory tuning
+systemd-zram-generator
+earlyoom
+
+# terminal look
+fastfetch
+eza
+bat
+fzf
+zoxide
+fonts-jetbrains-mono
+
+# building the rounded blur library
+git
+meson
+ninja-build
+build-essential
+pkgconf
+gobject-introspection
+libgirepository1.0-dev
+libglib2.0-dev
+libmutter-18-dev
+
+# everyday apps
+vlc
+okular
+libreoffice
+pymol
+python3-tk
+nodejs
+npm
+zsh
+
+# Bengali keyboard (Avro) and fonts
+ibus-avro
+fonts-noto-core
+fonts-noto-extra
+
+# video hardware decoding check
+vainfo
