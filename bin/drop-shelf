@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Drop Shelf - a Mac-style notch shelf at the top center of the screen.
+
+Drop files, images or text on it, then drag them out into any other window.
+  * hidden until the cursor (or a drag) reaches the top center of the screen
+  * hover or drag something over it         -> it opens
+  * drag a tile out                         -> drops that item anywhere
+  * "Drag all"                              -> drags every item at once
+  * double-click a tile                     -> open the file / copy the text
+  * "Paste" (or Ctrl+V while hovering)      -> adds whatever is on the clipboard
+  * x on a tile / "Clear"                   -> remove
+
+Positioned and kept on top by the drop-shelf@sagar GNOME extension.
+Items are kept in ~/.local/state/drop-shelf/ (files are kept as references, not copies;
+dropped images/screenshots without a file are saved there).
+"""
+import json
+import os
+import time
+import uuid
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+APP_ID = "io.sagar.DropShelf"
+STATE = os.path.join(GLib.get_user_state_dir(), "drop-shelf")
+DB = os.path.join(STATE, "items.json")
+FILES = os.path.join(STATE, "files")
+MAX_ITEMS = 40
+TILE_W = 78
+
+CSS = b"""
+window.dropshelf { background: transparent; box-shadow: none; }
+window.dropshelf .notch {
+  background: #0e0c0c;
+  border-radius: 0 0 20px 20px;
+  border: 1px solid rgba(232, 44, 58, 0.22);
+  border-top-width: 0;
+  padding: 3px 14px 6px 14px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+window.dropshelf .notch.ghost {
+  background: transparent; border-color: transparent; box-shadow: none;
+  padding: 0; min-width: 260px; min-height: 8px;
+}
+window.dropshelf .notch.hot {
+  border-color: rgba(232, 44, 58, 0.95);
+  box-shadow: inset 0 -10px 22px rgba(232, 44, 58, 0.30);
+}
+.handle { color: #e6ddd3; font-weight: 600; font-size: 11px; }
+.handle-icon { color: #e82c3a; }
+.badge {
+  background: #e82c3a; color: white; border-radius: 9px;
+  padding: 0 6px; font-size: 10px; font-weight: 700; min-height: 15px;
+}
+.hint { color: rgba(230, 221, 211, 0.55); font-size: 11px; padding: 14px 24px; }
+.tool {
+  padding: 1px 9px; min-height: 20px; border-radius: 8px; border: none;
+  color: #e6ddd3; background: rgba(255, 255, 255, 0.07); font-size: 10px; box-shadow: none;
+}
+.tool:hover { background: rgba(232, 44, 58, 0.40); }
+.tile { background: rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 6px 4px 4px 4px; }
+.tile:hover { background: rgba(232, 44, 58, 0.20); }
+.tile.missing { opacity: 0.4; }
+.tile-name { color: #e6ddd3; font-size: 10px; }
+.textprev {
+  background: rgba(255, 255, 255, 0.09); border-radius: 8px; padding: 3px 4px;
+  color: #e6ddd3; font-size: 8px; font-family: monospace;
+}
+.x {
+  min-width: 16px; min-height: 16px; padding: 0; margin: 0; border-radius: 8px; border: none;
+  background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 9px; box-shadow: none;
+}
+.x:hover { background: #e82c3a; }
+scrolledwindow, scrolledwindow > viewport { background: transparent; }
+"""
+
+
+def _value(gtype, obj):
+    v = GObject.Value()
+    v.init(gtype)
+    v.set_boxed(obj) if gtype != GObject.TYPE_STRING else v.set_string(obj)
+    return v
+
+
+class Shelf(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Drop Shelf")
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.add_css_class("dropshelf")
+
+        self.items = self._load()
+        self.hover = self.drag_in = self.drag_out = self.peek = False
+        self._peek_id = 0
+        self._collapse_id = 0
+
+        self.notch = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.notch.add_css_class("notch")
+        self.notch.set_halign(Gtk.Align.CENTER)
+        self.notch.set_valign(Gtk.Align.START)
+        self.set_child(self.notch)
+
+        # header: icon + label + count, and tools when open
+        head = self.head = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+        icon = Gtk.Image.new_from_icon_name("go-bottom-symbolic")
+        icon.add_css_class("handle-icon")
+        icon.set_pixel_size(12)
+        self.title = Gtk.Label(label="Drop")
+        self.title.add_css_class("handle")
+        self.badge = Gtk.Label()
+        self.badge.add_css_class("badge")
+        self.drag_all = self._tool("Drag all", None)
+        self.paste_btn = self._tool("Paste", lambda *_: self.paste())
+        self.clear_btn = self._tool("Clear", lambda *_: self.clear())
+        for w in (icon, self.title, self.badge, self.drag_all, self.paste_btn, self.clear_btn):
+            head.append(w)
+        self.notch.append(head)
+
+        src = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        src.connect("prepare", lambda *_: self._provider(self.items))
+        src.connect("drag-begin", self._on_drag_begin)
+        src.connect("drag-end", self._on_drag_end)
+        self.drag_all.add_controller(src)
+
+        # body: tiles (or a hint when empty), revealed when open
+        self.tiles = Gtk.Box(spacing=8)
+        self.scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                         vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                         propagate_natural_width=True,
+                                         propagate_natural_height=True,
+                                         max_content_width=660)
+        self.scroll.set_child(self.tiles)
+        self.hint = Gtk.Label(label="Drop files, images or text here  ·  Paste adds the clipboard")
+        self.hint.add_css_class("hint")
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.append(self.scroll)
+        body.append(self.hint)
+        self.revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
+                                     transition_duration=160)
+        self.revealer.set_child(body)
+        self.notch.append(self.revealer)
+
+        # open on hover / drag-over
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_: self._set("hover", True))
+        motion.connect("leave", lambda *_: self._set("hover", False))
+        self.notch.add_controller(motion)
+        dmotion = Gtk.DropControllerMotion()
+        dmotion.connect("enter", lambda *_: self._set("drag_in", True))
+        dmotion.connect("leave", lambda *_: self._set("drag_in", False))
+        self.notch.add_controller(dmotion)
+
+        # accept drops
+        target = Gtk.DropTarget.new(GObject.TYPE_NONE, Gdk.DragAction.COPY)
+        target.set_gtypes([Gdk.FileList, Gdk.Texture, GObject.TYPE_STRING])
+        target.connect("drop", self._on_drop)
+        self.notch.add_controller(target)
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+
+        self.refresh()
+
+    # ---------- state ----------
+    def _load(self):
+        try:
+            with open(DB) as f:
+                items = json.load(f)
+            return [i for i in items if i.get("kind") != "file" or os.path.exists(i.get("path", ""))]
+        except (OSError, ValueError):
+            return []
+
+    def _save(self):
+        os.makedirs(STATE, exist_ok=True)
+        tmp = DB + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.items, f, indent=1)
+        os.replace(tmp, DB)
+        # forget saved images that are no longer on the shelf
+        keep = {i.get("path") for i in self.items}
+        if os.path.isdir(FILES):
+            for n in os.listdir(FILES):
+                p = os.path.join(FILES, n)
+                if p not in keep:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+    def add(self, item):
+        item.setdefault("id", uuid.uuid4().hex)
+        item.setdefault("added", time.time())
+        key = item.get("path") or item.get("text")
+        self.items = [i for i in self.items if (i.get("path") or i.get("text")) != key]
+        self.items.insert(0, item)
+        del self.items[MAX_ITEMS:]
+        self._save()
+        self.refresh()
+
+    def add_file(self, path):
+        self.add({"kind": "file", "path": path, "name": os.path.basename(path.rstrip("/")) or path})
+
+    def add_text(self, text):
+        text = text.strip("\n")
+        if text.strip():
+            self.add({"kind": "text", "text": text, "name": text.strip().splitlines()[0][:40]})
+
+    def add_texture(self, texture):
+        os.makedirs(FILES, exist_ok=True)
+        path = os.path.join(FILES, time.strftime("image-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4] + ".png")
+        texture.save_to_png(path)
+        self.add({"kind": "file", "path": path, "name": os.path.basename(path), "owned": True})
+
+    def remove(self, item_id):
+        self.items = [i for i in self.items if i["id"] != item_id]
+        self._save()
+        self.refresh()
+
+    def clear(self):
+        self.items = []
+        self._save()
+        self.refresh()
+
+    # ---------- drop in ----------
+    def _on_drop(self, _target, value, _x, _y):
+        if isinstance(value, Gdk.FileList):
+            for f in value.get_files():
+                if f.get_path():
+                    self.add_file(f.get_path())
+                else:
+                    self.add_text(f.get_uri())
+        elif isinstance(value, Gdk.Texture):
+            self.add_texture(value)
+        elif isinstance(value, str):
+            uris = [u for u in value.splitlines() if u.startswith("file://")]
+            if uris and len(uris) == len(value.strip().splitlines()):
+                for u in uris:
+                    self.add_file(Gio.File.new_for_uri(u).get_path())
+            else:
+                self.add_text(value)
+        else:
+            return False
+        return True
+
+    def paste(self):
+        cb = self.get_display().get_clipboard()
+        fmts = cb.get_formats()
+        if fmts.contain_gtype(Gdk.FileList):
+            cb.read_value_async(Gdk.FileList, GLib.PRIORITY_DEFAULT, None, self._pasted_value)
+        elif fmts.contain_gtype(Gdk.Texture):
+            cb.read_texture_async(None, self._pasted_texture)
+        else:
+            cb.read_text_async(None, self._pasted_text)
+
+    def _pasted_value(self, cb, res):
+        try:
+            self._on_drop(None, cb.read_value_finish(res), 0, 0)
+        except GLib.Error:
+            pass
+
+    def _pasted_texture(self, cb, res):
+        try:
+            t = cb.read_texture_finish(res)
+            if t:
+                self.add_texture(t)
+        except GLib.Error:
+            pass
+
+    def _pasted_text(self, cb, res):
+        try:
+            t = cb.read_text_finish(res)
+            if t:
+                self.add_text(t)
+        except GLib.Error:
+            pass
+
+    def _on_key(self, _c, keyval, _code, state):
+        if state & Gdk.ModifierType.CONTROL_MASK and keyval in (Gdk.KEY_v, Gdk.KEY_V):
+            self.paste()
+            return True
+        return False
+
+    # ---------- drag out ----------
+    def _provider(self, items):
+        files = [Gio.File.new_for_path(i["path"]) for i in items
+                 if i["kind"] == "file" and os.path.exists(i["path"])]
+        texts = [i["text"] for i in items if i["kind"] == "text"]
+        provs = []
+        if files:
+            provs.append(Gdk.ContentProvider.new_for_value(
+                _value(Gdk.FileList, Gdk.FileList.new_from_list(files))))
+        if texts:
+            provs.append(Gdk.ContentProvider.new_for_value(_value(GObject.TYPE_STRING, "\n".join(texts))))
+        if not provs:
+            return None
+        return provs[0] if len(provs) == 1 else Gdk.ContentProvider.new_union(provs)
+
+    def _on_drag_begin(self, source, _drag):
+        self.drag_out = True
+        widget = source.get_widget()
+        source.set_icon(Gtk.WidgetPaintable.new(widget), widget.get_width() // 2, widget.get_height() // 2)
+
+    def _on_drag_end(self, *_):
+        self.drag_out = False
+        self._update_open()
+
+    # ---------- view ----------
+    def _tool(self, label, cb):
+        b = Gtk.Button(label=label)
+        b.add_css_class("tool")
+        b.set_focus_on_click(False)
+        if cb:
+            b.connect("clicked", cb)
+        return b
+
+    def _thumb(self, item):
+        if item["kind"] == "text":
+            lbl = Gtk.Label(label=item["text"][:120], wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                            lines=4, ellipsize=Pango.EllipsizeMode.END, xalign=0, yalign=0,
+                            max_width_chars=12, width_request=60, height_request=46)
+            lbl.add_css_class("textprev")
+            return lbl
+        path = item["path"]
+        f = Gio.File.new_for_path(path)
+        try:
+            info = f.query_info("standard::icon,standard::content-type", Gio.FileQueryInfoFlags.NONE, None)
+            ctype = info.get_content_type() or ""
+            if ctype.startswith("image/"):
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 60, 46, True)
+                img = Gtk.Picture.new_for_paintable(Gdk.Texture.new_for_pixbuf(pb))
+                img.set_size_request(60, 46)
+                return img
+            img = Gtk.Image.new_from_gicon(info.get_icon())
+        except GLib.Error:
+            img = Gtk.Image.new_from_icon_name("text-x-generic")
+        img.set_pixel_size(42)
+        img.set_size_request(60, 46)
+        return img
+
+    def _tile(self, item):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, width_request=TILE_W)
+        box.add_css_class("tile")
+        if item["kind"] == "file" and not os.path.exists(item["path"]):
+            box.add_css_class("missing")
+        box.append(self._thumb(item))
+        name = Gtk.Label(label=item.get("name", ""), ellipsize=Pango.EllipsizeMode.MIDDLE,
+                         max_width_chars=10)
+        name.add_css_class("tile-name")
+        box.append(name)
+        box.set_tooltip_text(item.get("path") or item["text"][:400])
+
+        x = Gtk.Button(label="✕", halign=Gtk.Align.END, valign=Gtk.Align.START)
+        x.add_css_class("x")
+        x.set_focus_on_click(False)
+        x.connect("clicked", lambda *_: self.remove(item["id"]))
+        over = Gtk.Overlay()
+        over.set_child(box)
+        over.add_overlay(x)
+
+        src = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        src.connect("prepare", lambda *_: self._provider([item]))
+        src.connect("drag-begin", self._on_drag_begin)
+        src.connect("drag-end", self._on_drag_end)
+        box.add_controller(src)
+
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda g, n, *_: n == 2 and self._activate(item))
+        box.add_controller(click)
+        return over
+
+    def _activate(self, item):
+        if item["kind"] == "file":
+            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(item["path"]).get_uri(), None)
+        else:
+            self.get_display().get_clipboard().set(item["text"])
+
+    def refresh(self):
+        while (c := self.tiles.get_first_child()):
+            self.tiles.remove(c)
+        for item in self.items:
+            self.tiles.append(self._tile(item))
+        n = len(self.items)
+        self.badge.set_label(str(n))
+        self.badge.set_visible(n > 0)
+        self.scroll.set_visible(n > 0)
+        self.hint.set_visible(n == 0)
+        self._update_open()
+
+    def _set(self, attr, val):
+        setattr(self, attr, val)
+        self._update_open()
+
+    def _update_open(self):
+        want = self.hover or self.drag_in or self.drag_out or self.peek
+        if self._collapse_id:
+            GLib.source_remove(self._collapse_id)
+            self._collapse_id = 0
+        if want:
+            self._apply_open(True)
+        else:  # small delay so moving the pointer across the edge doesn't flicker
+            self._collapse_id = GLib.timeout_add(450, self._collapse)
+
+    def _collapse(self):
+        self._collapse_id = 0
+        self._apply_open(False)
+        return GLib.SOURCE_REMOVE
+
+    def peek_open(self):
+        """Opened by the extension (cursor/drag at the top center of the screen).
+        Stays open while it keeps being called or while the pointer is on the shelf."""
+        if self._peek_id:
+            GLib.source_remove(self._peek_id)
+        self._peek_id = GLib.timeout_add(1500, self._peek_done)
+        self._set("peek", True)
+
+    def _peek_done(self):
+        self._peek_id = 0
+        self._set("peek", False)
+        return GLib.SOURCE_REMOVE
+
+    def _apply_open(self, is_open):
+        # closed = an invisible strip under the clock; it only shows when the cursor gets there
+        self.head.set_visible(is_open)
+        (self.notch.remove_css_class if is_open else self.notch.add_css_class)("ghost")
+        self.revealer.set_reveal_child(is_open)
+        n = len(self.items)
+        for w in (self.paste_btn, self.clear_btn):
+            w.set_visible(is_open)
+        self.clear_btn.set_sensitive(n > 0)
+        self.drag_all.set_visible(is_open and n > 1)
+        self.title.set_label("Drop Shelf" if is_open else "Drop")
+        (self.notch.add_css_class if self.drag_in else self.notch.remove_css_class)("hot")
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win = None
+
+    def do_activate(self):
+        if not self.win:
+            prov = Gtk.CssProvider()
+            prov.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                      Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.win = Shelf(self)
+            peek = Gio.SimpleAction.new("peek", None)
+            peek.connect("activate", lambda *_: self.win.peek_open())
+            self.add_action(peek)
+        self.win.present()
+
+
+if __name__ == "__main__":
+    raise SystemExit(App().run(None))

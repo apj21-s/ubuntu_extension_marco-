@@ -1,0 +1,7 @@
+{
+  "uuid": "drop-shelf@sagar",
+  "name": "Drop Shelf",
+  "description": "Mac-style notch shelf at the top center: drop files or text on it, drag them into any window. Runs ~/.local/bin/drop-shelf.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

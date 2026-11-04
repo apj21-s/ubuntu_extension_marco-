@@ -1,0 +1,7 @@
+{
+  "uuid": "drag-switch@sagar",
+  "name": "Drag Switch",
+  "description": "While dragging a file or text from any app: hold over a dock icon to bring that app's window forward (even on another workspace), hold at the left/right screen edge to switch workspace, push to the dock edge to reveal a hidden dock.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

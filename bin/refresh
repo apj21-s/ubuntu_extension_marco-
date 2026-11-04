@@ -12,7 +12,7 @@ fi
 [ -f "$HOME/.local/share/icons/hicolor/index.theme" ] && gtk-update-icon-cache -q -f "$HOME/.local/share/icons/hicolor" 2>/dev/null
 
 # 2. Sound: fix only if broken.
-if grep -q sof /proc/asound/cards 2>/dev/null && [ "$(pactl get-default-sink 2>/dev/null)" != "auto_null" ]; then
+if grep -qE "^ *[0-9]+ \[" /proc/asound/cards 2>/dev/null && [ "$(pactl get-default-sink 2>/dev/null)" != "auto_null" ]; then
   report+=("✔ Sound: working")
 else
   r=$("$HOME/.local/bin/fix-audio" --quiet 2>/dev/null)

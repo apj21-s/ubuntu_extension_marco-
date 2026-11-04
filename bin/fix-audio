@@ -14,7 +14,7 @@ flock -n 9 || { [ $QUIET -eq 1 ] && echo "already being fixed"; exit 0; }   # on
 
 say() { [ $QUIET -eq 1 ] && return; "$HOME/.local/bin/notify" -i audio-speakers-symbolic "$1" "$2"; }
 result() { [ $QUIET -eq 1 ] && echo "$1"; }
-card_ok()  { grep -q sof /proc/asound/cards 2>/dev/null; }
+card_ok()  { grep -qE "^ *[0-9]+ \[" /proc/asound/cards 2>/dev/null; }   # any sound card (was SOF-only)
 sound_ok() {
   card_ok || return 1
   s=$(pactl get-default-sink 2>/dev/null)

@@ -70,3 +70,7 @@ fonts-noto-extra
 
 # video hardware decoding check
 vainfo
+
+# needed by extensions but missing upstream: Vitals (GTop), Emoji Copy (Gda)
+gir1.2-gtop-2.0
+gir1.2-gda-5.0

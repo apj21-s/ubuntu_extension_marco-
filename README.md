@@ -43,6 +43,8 @@ Things you add yourself (deliberately not in the repo):
 | **Click Ripple** | A soft crimson ring ripples out from the pointer on every click (white for right-click) |
 | **Dot Badges** | A small glowing red dot replaces notification numbers on dock icons |
 | **Terminal Copy on Select** | Selecting text in a terminal copies it to the clipboard |
+| **Drop Shelf** | A hidden Mac-style shelf at the top center: rest the cursor at the top edge (or drag something there) and it slides out. Drop files, images or text on it, then drag them into any other window |
+| **Drag Switch** | While dragging from any app: hold over a dock icon to bring that app's window forward (even on another workspace), hold at the left/right screen edge to switch workspace, push to the dock edge to reveal a hidden dock |
 
 ### Desktop effects and add-ons (`extensions/third-party/`)
 These are exact copies of the installed versions, including my small tweak to Dynamic Music Pill: the visualizer glows in the album cover's color, and the pill also shows on the lock screen. Each one keeps its original license.
@@ -104,6 +106,7 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `docker-toggle` | Starts and stops Docker on demand to save memory |
 | `weekly-tidy` | Weekly cleanup with a report |
 | `welcome` | Terminal welcome screen: greeting, status chips, weather, a quote |
+| `drop-shelf` | The Drop Shelf app (started and positioned by the Drop Shelf extension) |
 
 ### Background services (`systemd/user/`)
 `power-auto`, `headphone-magic`, `fix-audio-login`, `organize-downloads` (path + daily timer), `session-keeper` (save every 2 min + restore at login), `weekly-tidy` (Sundays) and `ambient` (idle monitor, off by default). File indexing (localsearch/tracker) is switched off.
