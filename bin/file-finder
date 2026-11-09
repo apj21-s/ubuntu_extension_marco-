@@ -988,6 +988,19 @@ def timer_extension_active():
         return False
 
 
+PHONE_DROP = os.path.join(HOME, ".local", "bin", "phone-drop")
+
+
+def popout_call(method, args=None):
+    """The Pop-out extension's D-Bus object (in the shell). None if it isn't running."""
+    try:
+        return Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.gnome.Shell", "/io/arco/Popout", "io.arco.Popout", method, args, None,
+            Gio.DBusCallFlags.NONE, 2000, None).unpack()
+    except GLib.Error:
+        return None
+
+
 def _run(*argv):
     try:
         Gio.Subprocess.new(list(argv), Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
@@ -1040,6 +1053,8 @@ COMMANDS = [  # name, usage, what it does, icon
     ("dark", "dark | light", "Switch dark or light style", "weather-clear-night-symbolic"),
     ("lock", "lock", "Lock the screen", "system-lock-screen-symbolic"),
     ("suspend", "suspend", "Put the computer to sleep", "weather-clear-night-symbolic"),
+    ("phone", "phone   (Super+B)", "Send or get files with your phone by QR code", "phone-symbolic"),
+    ("popout", "popout <window>   (Super+P)", "Float a live mini copy of a window", "view-restore-symbolic"),
 ]
 
 
@@ -1375,7 +1390,7 @@ class Finder(Gtk.ApplicationWindow):
         self.section.set_label("Recent" if items else " ")
         if not items:
             self.show_empty("Search every file, folder and app on this computer.\nType > for commands.")
-        self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), (">", "Commands"), ("Tab", "Contents")])
+        self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), ("⇧ ↵", "To phone"), (">", "Commands")])
         self.say(self._sources())
 
     def _sources(self):
@@ -1482,6 +1497,21 @@ class Finder(Gtk.ApplicationWindow):
             return [cmd("Lock the screen", "", icon, run=lambda: _run("loginctl", "lock-session") and "Locked")]
         if name == "suspend":
             return [cmd("Sleep now", "suspend", icon, run=lambda: _run("systemctl", "suspend") and "Sleeping")]
+        if name == "phone":
+            return [cmd("Open Phone Drop", "scan the QR code with the phone's camera  ·  Shift+Enter on a file sends it",
+                        icon, run=lambda: _run(PHONE_DROP) and "Phone Drop")]
+        if name == "popout":
+            res = popout_call("List")
+            if res is None:
+                return [cmd("Pop-out isn't running yet", "log out and back in once after installing it", icon)]
+            rows = []
+            for wid, title, app, popped in res[0]:
+                if title == "File Finder" or (a and a not in f"{title} {app}".lower()):
+                    continue
+                rows.append(cmd(("Close the pop-out of " if popped else "Pop out ") + (title or app), app, icon,
+                                run=lambda wid=wid, p=popped: popout_call("PopOut", GLib.Variant("(s)", (wid,)))
+                                is not None and ("Pop-out closed" if p else "Popped out")))
+            return rows or [cmd("No window like that", "> popout shows every open window", icon)]
         return []
 
     def _kill(self, pids, name):
@@ -1548,7 +1578,7 @@ class Finder(Gtk.ApplicationWindow):
                 self.show_empty(f"No results for “{query}”" + (
                     "\nOnly Documents and Downloads are searched inside" if self.mode == "contents" else ""))
             if self.mode == "files":
-                self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), ("Tab", "Contents")])
+                self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), ("⇧ ↵", "To phone"), ("Tab", "Contents")])
             n = sum(1 for i in items if i["kind"] in ("file", "hit"))
             more = f"{total:,} results" if total is not None and total > n else f"{n} result" + ("" if n == 1 else "s")
             ms = f"  ·  {took * 1000:.0f} ms" if took is not None else ""
@@ -1743,7 +1773,12 @@ class Finder(Gtk.ApplicationWindow):
             self._move(8 if keyval == Gdk.KEY_Page_Down else -8)
             return True
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
-            (self.reveal if ctrl else self.activate)(self._selected())
+            item = self._selected()
+            if shift and item and item.get("path"):  # Shift+Enter: send it to the phone
+                _run(PHONE_DROP, item["path"])
+                self.set_visible(False)
+                return True
+            (self.reveal if ctrl else self.activate)(item)
             return True
         if ctrl and shift and keyval in (Gdk.KEY_a, Gdk.KEY_A):
             self.lock.set_active(not self.lock.get_active())

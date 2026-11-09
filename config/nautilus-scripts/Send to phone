@@ -1,0 +1,6 @@
+#!/bin/bash
+# Files: right-click > Scripts > Send to phone. Opens Phone Drop with the selected files;
+# scan its QR code with the phone's camera.
+mapfile -t files < <(printf '%s' "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS" | sed '/^$/d')
+[ ${#files[@]} -eq 0 ] && files=("$@")
+exec "$HOME/.local/bin/phone-drop" "${files[@]}"

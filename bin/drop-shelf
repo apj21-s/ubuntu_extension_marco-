@@ -168,7 +168,9 @@ class Shelf(Gtk.ApplicationWindow):
         self.drag_all = self._tool("Drag all", None)
         self.paste_btn = self._tool("Paste", lambda *_: self.paste())
         self.clear_btn = self._tool("Clear", lambda *_: self.clear())
-        for w in (icon, self.title, self.badge, self.drag_all, self.paste_btn, self.clear_btn):
+        self.phone_btn = self._tool("Phone", lambda *_: self.send_to_phone())
+        self.phone_btn.set_tooltip_text("Send everything on the shelf to your phone (QR code)")
+        for w in (icon, self.title, self.badge, self.drag_all, self.paste_btn, self.phone_btn, self.clear_btn):
             head.append(w)
         self.notch.append(head)
 
@@ -272,6 +274,21 @@ class Shelf(Gtk.ApplicationWindow):
         self.items = [i for i in self.items if i["id"] != item_id]
         self._save()
         self.refresh()
+
+    def send_to_phone(self):
+        """Open Phone Drop with the shelf's files (and its text snippets)."""
+        argv = [os.path.join(os.path.expanduser("~"), ".local", "bin", "phone-drop")]
+        argv += [i["path"] for i in self.items if i["kind"] == "file" and os.path.exists(i["path"])]
+        texts = [i["text"] for i in self.items if i["kind"] == "text"]
+        if texts:
+            tmp = os.path.join(GLib.get_user_runtime_dir(), f"drop-shelf-text-{uuid.uuid4().hex[:6]}")
+            with open(tmp, "w") as f:
+                f.write("\0".join(texts))
+            argv += ["--text", tmp]
+        try:
+            Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
+        except GLib.Error:
+            pass
 
     def clear(self):
         self.items = []
@@ -480,6 +497,7 @@ class Shelf(Gtk.ApplicationWindow):
         n = len(self.items)
         self.clear_btn.set_sensitive(n > 0)
         self.drag_all.set_visible(is_open and n > 1)
+        self.phone_btn.set_visible(is_open and n > 0)
         (self.notch.add_css_class if self.drag_in else self.notch.remove_css_class)("hot")
         if is_open == self._is_open:
             return
@@ -504,6 +522,7 @@ class Shelf(Gtk.ApplicationWindow):
         for w in (self.paste_btn, self.clear_btn):
             w.set_visible(is_open)
         self.drag_all.set_visible(is_open and len(self.items) > 1)
+        self.phone_btn.set_visible(is_open and len(self.items) > 0)
         self.title.set_label("Drop Shelf" if is_open else "Drop")
         (self.notch.remove_css_class if is_open else self.notch.add_css_class)("ghost")
         if not is_open:

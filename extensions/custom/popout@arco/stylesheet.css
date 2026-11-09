@@ -1,0 +1,17 @@
+/* Pop-out: a floating live mini window. Wallpaper Mood recolours the accents. */
+.popout {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background-color: #0e0c0c;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+}
+.popout:hover { border-color: rgba(208, 96, 106, 0.75); }
+.popout-bar {
+  spacing: 4px; padding: 3px; border-radius: 99px;
+  background-color: rgba(14, 12, 12, 0.82);
+}
+.popout-btn {
+  padding: 5px; border-radius: 99px; color: rgba(245, 238, 230, 0.85);
+  transition-duration: 120ms;
+}
+.popout-btn:hover, .popout-btn:focus { background-color: rgba(177, 68, 77, 0.75); color: #fff; }

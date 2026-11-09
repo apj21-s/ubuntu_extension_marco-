@@ -87,8 +87,16 @@ for d in "$REPO"/extensions/custom/*/ "$REPO"/extensions/third-party/*/; do
   put "${d%/}" "$HOME/.local/share/gnome-shell/extensions/$(basename "$d")"
 done
 
+# extensions with their own settings (e.g. Pop-out's shortcut) need their schemas compiled
+for s in "$HOME"/.local/share/gnome-shell/extensions/*/schemas; do
+  [ -d "$s" ] && run glib-compile-schemas "$s"
+done
+
 step "Scripts (~/.local/bin)"
 for f in "$REPO"/bin/*; do put_rendered "$f" "$HOME/.local/bin/$(basename "$f")" 755; done
+
+step "Files right-click scripts (Send to phone)"
+for f in "$REPO"/config/nautilus-scripts/*; do put "$f" "$HOME/.local/share/nautilus/scripts/$(basename "$f")"; done
 
 step "App launchers and default apps"
 for f in "$REPO"/applications/*.desktop; do put_rendered "$f" "$HOME/.local/share/applications/$(basename "$f")" 644; done

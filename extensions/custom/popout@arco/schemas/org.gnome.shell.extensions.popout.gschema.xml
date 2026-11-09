@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.popout" path="/org/gnome/shell/extensions/popout/">
+    <key name="toggle-popout" type="as">
+      <default><![CDATA[['<Super>p']]]></default>
+      <summary>Pop out the focused window, or close its pop-out</summary>
+    </key>
+  </schema>
+</schemalist>

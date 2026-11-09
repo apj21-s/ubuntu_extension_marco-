@@ -68,6 +68,16 @@ systemctl daemon-reload
 systemctl enable --now plocate-updatedb.timer
 systemctl start --no-block plocate-updatedb.service
 
+step "Phone Drop: let phones on your hotspot / Wi-Fi reach it (TCP 47800 on $WIFI)"
+# The hotspot and Wi-Fi share the Wi-Fi card, so one rule covers both. The port only
+# listens while the Phone Drop window is open, and every link needs its random secret.
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  ufw allow in on "$WIFI" to any port 47800 proto tcp comment "Phone Drop" >/dev/null
+  echo "   firewall rule added"
+else
+  echo "   firewall is off - nothing to do"
+fi
+
 step "Weekly system tidy (Sundays)"
 put "$SRC/sbin/weekly-tidy-root" /usr/local/sbin/weekly-tidy-root 755
 put "$SRC/systemd/weekly-tidy-root.service" /etc/systemd/system/weekly-tidy-root.service 644

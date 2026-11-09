@@ -27,6 +27,7 @@ nftables
 gnome-session-canberra
 curl
 plocate
+qrencode
 
 # music pill visualizer
 cava
