@@ -19,6 +19,7 @@ Wi-Fi card (both added by the system part of the installer).
 """
 import html
 import json
+import mimetypes
 import os
 import secrets
 import shutil
@@ -59,12 +60,19 @@ class Share:
     from server threads (the GTK side moves it to the main loop)."""
 
     def __init__(self, on_event=lambda *a: None):
-        self.token = secrets.token_urlsafe(16)
+        self.token = secrets.token_urlsafe(8)
         self.lock = threading.Lock()
         self.items = {}  # id -> {"path", "name", "size", "dir", "sent"}
         self.texts = []
         self.on_event = on_event
         self.last_use = time.time()
+        self.seen = set()  # phones (IP addresses) that opened the page
+        self.version = 1   # bumped on every change; the phone page asks "anything new since N?"
+
+    def hello(self, ip):
+        if ip not in self.seen:
+            self.seen.add(ip)
+            self.on_event("hello", ip)
 
     def add(self, path):
         path = os.path.abspath(path)
@@ -80,6 +88,7 @@ class Share:
                        if os.path.isfile(os.path.join(r, f))) if isdir else os.path.getsize(path)
             self.items[i] = {"path": path, "name": os.path.basename(path.rstrip("/")) + (".zip" if isdir else ""),
                              "size": size, "dir": isdir, "sent": 0}
+            self.version += 1
         self.on_event("added", i)
         return i
 
@@ -89,69 +98,95 @@ class Share:
             with self.lock:
                 if text not in self.texts:
                     self.texts.append(text)
+                    self.version += 1
             self.on_event("text", None)
+
+    def remove(self, item_id):
+        with self.lock:
+            if self.items.pop(item_id, None):
+                self.version += 1
 
     def state(self):
         with self.lock:
-            return {"files": [{"id": i, "name": it["name"], "size": it["size"]} for i, it in self.items.items()],
+            return {"version": self.version, "files": [{"id": i, "name": it["name"], "size": it["size"]} for i, it in self.items.items()],
                     "texts": list(self.texts)}
 
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Phone Drop</title><style>
-:root{--bg:#0e0c0c;--card:#1a1616;--ink:#f2ebe3;--dim:rgba(230,221,211,.55);--acc:%(accent)s;--light:%(light)s}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
-font:16px/1.4 system-ui,-apple-system,"Ubuntu Sans",sans-serif;padding:20px 16px 40px}
-h1{font-size:22px;margin:4px 0 2px}p.sub{color:var(--dim);margin:0 0 18px;font-size:14px}
-h2{font-size:13px;color:var(--dim);font-weight:600;margin:22px 4px 8px;text-transform:uppercase;letter-spacing:.06em}
-.card{background:var(--card);border-radius:16px;padding:6px;border:1px solid rgba(255,255,255,.06)}
-.row{display:flex;align-items:center;gap:12px;padding:10px 10px}.row+.row{border-top:1px solid rgba(255,255,255,.05)}
-.name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.size{color:var(--dim);font-size:13px}
-a.btn,button{background:var(--acc);color:#fff;border:0;border-radius:999px;padding:9px 16px;font:600 14px system-ui;
-text-decoration:none;white-space:nowrap}
-a.btn.ghost,button.ghost{background:rgba(255,255,255,.08);color:var(--ink)}
-.all{display:block;text-align:center;margin-top:10px;padding:13px}
-.drop{display:block;text-align:center;padding:26px 12px;border:2px dashed rgba(255,255,255,.15);border-radius:16px;color:var(--dim)}
-.drop b{color:var(--ink);display:block;font-size:17px;margin-bottom:4px}
-input[type=file]{display:none}.bar{height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden;margin-top:6px}
-.bar i{display:block;height:100%%;width:0;background:var(--light);transition:width .15s}
-textarea{width:100%%;background:transparent;color:var(--ink);border:0;font:14px ui-monospace,monospace;resize:none}
-.empty{color:var(--dim);padding:14px 10px;font-size:14px}.ok{color:var(--light)}
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e0c0c"><title>Phone Drop</title><style>
+:root{--bg:#0e0c0c;--card:#191515;--card2:#221c1c;--ink:#f2ebe3;--dim:rgba(230,221,211,.55);--line:rgba(255,255,255,.07);--acc:%(accent)s;--light:%(light)s}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:radial-gradient(120%% 60%% at 50%% -10%%,color-mix(in srgb,var(--acc) 22%%,transparent),transparent 70%%),var(--bg);
+color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Ubuntu Sans",sans-serif;padding:22px 16px 48px;min-height:100vh}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:22px}
+.dot{width:42px;height:42px;border-radius:14px;background:var(--acc);display:grid;place-items:center;box-shadow:0 6px 24px color-mix(in srgb,var(--acc) 45%%,transparent)}
+.dot svg{width:24px;height:24px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+h1{font-size:20px;margin:0}.sub{color:var(--dim);font-size:13px}
+.send{display:flex;align-items:center;gap:14px;padding:18px;border-radius:20px;background:var(--acc);color:#fff;font-weight:700;font-size:17px;
+box-shadow:0 10px 30px color-mix(in srgb,var(--acc) 40%%,transparent);cursor:pointer}
+.send small{display:block;font-weight:400;opacity:.85;font-size:13px}
+.send svg{width:30px;height:30px;flex:none;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+input[type=file]{display:none}
+h2{font-size:12px;color:var(--dim);font-weight:700;margin:26px 4px 10px;text-transform:uppercase;letter-spacing:.08em;display:flex;justify-content:space-between}
+h2 a{color:var(--light);text-decoration:none;text-transform:none;letter-spacing:0;font-size:13px}
+.list{background:var(--card);border-radius:18px;border:1px solid var(--line);overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;color:inherit;text-decoration:none}.row+.row{border-top:1px solid var(--line)}
+.row:active{background:var(--card2)}
+.ext{width:40px;height:40px;border-radius:11px;background:var(--card2);display:grid;place-items:center;font:700 10px system-ui;color:var(--light);
+text-transform:uppercase;flex:none;overflow:hidden}.ext img{width:100%%;height:100%%;object-fit:cover}
+.name{flex:1;min-width:0}.name b{display:block;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.name span{color:var(--dim);font-size:13px}
+.get{width:36px;height:36px;border-radius:50%%;background:color-mix(in srgb,var(--acc) 25%%,transparent);display:grid;place-items:center;flex:none}
+.get svg{width:18px;height:18px;fill:none;stroke:var(--light);stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.bar{height:3px;background:var(--line);border-radius:2px;margin-top:6px;overflow:hidden}.bar i{display:block;height:100%%;width:0;background:var(--light);transition:width .2s}
+.ok{color:var(--light)!important}.bad{color:#ff8a8a!important}
+.empty{color:var(--dim);padding:18px 16px;font-size:14px;text-align:center}
+textarea{width:100%%;background:transparent;color:var(--ink);border:0;font:14px ui-monospace,monospace;resize:none;outline:0}
+button{background:var(--card2);color:var(--ink);border:0;border-radius:999px;padding:8px 14px;font:600 13px system-ui}
+.toast{position:fixed;left:50%%;bottom:24px;transform:translate(-50%%,80px);background:var(--ink);color:var(--bg);padding:10px 18px;border-radius:999px;
+font-weight:600;font-size:14px;transition:transform .25s;pointer-events:none}.toast.on{transform:translate(-50%%,0)}
 </style></head><body>
-<h1>Phone Drop</h1><p class="sub">From %(host)s · works while the window is open on the laptop</p>
-<h2>From the laptop</h2><div class="card" id="files"><div class="empty">Nothing shared yet.</div></div>
-<a class="btn all ghost" id="zip" href="all.zip" style="display:none">Download everything (.zip)</a>
-<div id="textsec" style="display:none"><h2>Text</h2><div class="card" id="texts"></div></div>
-<h2>To the laptop</h2>
-<label class="drop"><input type="file" id="pick" multiple><b>Upload to laptop</b>Saved in Downloads › Phone Drop</label>
-<div class="card" id="ups" style="margin-top:10px;display:none"></div>
+<div class="top"><div class="dot"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg></div>
+<div><h1>%(host)s</h1><div class="sub" id="st">Connected · Phone Drop</div></div></div>
+<label class="send"><input type="file" id="pick" multiple><svg viewBox="0 0 24 24"><path d="M12 16V4M6 10l6-6 6 6"/><path d="M4 20h16"/></svg>
+<div>Send to laptop<small>Photos, videos, any file · saved in Downloads › Phone Drop</small></div></label>
+<div id="upsec" style="display:none"><h2>Sending</h2><div class="list" id="ups"></div></div>
+<h2><span>From the laptop</span><a id="zip" href="all.zip" style="display:none">Get all</a></h2>
+<div class="list" id="files"><div class="empty">Nothing yet. Drop files on Phone Drop on the laptop.</div></div>
+<div id="textsec" style="display:none"><h2>Text</h2><div class="list" id="texts"></div></div>
+<div class="toast" id="toast"></div>
 <script>
+const $=id=>document.getElementById(id);
 const fmt=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(0)+' KB':n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB';
 const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let last='';
-async function refresh(){try{const r=await fetch('state.json',{cache:'no-store'});const s=await r.json();const k=JSON.stringify(s);
-if(k===last)return;last=k;const f=document.getElementById('files');
-f.innerHTML=s.files.length?s.files.map(x=>`<div class="row"><div class="name">${esc(x.name)}<div class="size">${fmt(x.size)}</div></div>
-<a class="btn" href="f/${x.id}" download>Download</a></div>`).join(''):'<div class="empty">Nothing shared yet.</div>';
-document.getElementById('zip').style.display=s.files.length>1?'block':'none';
-document.getElementById('textsec').style.display=s.texts.length?'block':'none';
-document.getElementById('texts').innerHTML=s.texts.map((t,i)=>`<div class="row" style="align-items:flex-start">
-<textarea readonly rows="${Math.min(6,t.split('\\n').length)}" id="t${i}">${esc(t)}</textarea>
-<button class="ghost" onclick="copyT(${i},this)">Copy</button></div>`).join('');}catch(e){}}
-function copyT(i,b){const t=document.getElementById('t'+i);t.select();t.setSelectionRange(0,99999);
-let ok=false;try{ok=document.execCommand('copy')}catch(e){}if(!ok&&navigator.clipboard)navigator.clipboard.writeText(t.value);
-b.textContent='Copied';setTimeout(()=>b.textContent='Copy',1500)}
-document.getElementById('pick').onchange=e=>{const box=document.getElementById('ups');box.style.display='block';
-[...e.target.files].forEach(file=>{const row=document.createElement('div');row.className='row';
-row.innerHTML=`<div class="name">${esc(file.name)}<div class="bar"><i></i></div></div><span class="size">${fmt(file.size)}</span>`;
-box.prepend(row);const bar=row.querySelector('i'),st=row.querySelector('.size');const x=new XMLHttpRequest();
-x.open('PUT','up?name='+encodeURIComponent(file.name));x.upload.onprogress=ev=>{if(ev.lengthComputable)bar.style.width=(100*ev.loaded/ev.total)+'%%'};
-x.onload=()=>{if(x.status==200){bar.style.width='100%%';st.innerHTML='<span class="ok">Sent ✓</span>'}else st.textContent='Failed'};
-x.onerror=()=>st.textContent='Failed';x.send(file)});e.target.value=''};
-refresh();setInterval(refresh,2500);
-</script></body></html>"""
+const ext=n=>{const m=n.match(/\.([a-z0-9]{1,4})$/i);return m?m[1]:'file'};
+const IMG=/\.(jpe?g|png|gif|webp|bmp|heic)$/i;
+const toast=t=>{const e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),2200)};
+const DL='<div class="get"><svg viewBox="0 0 24 24"><path d="M12 4v12M6 10l6 6 6-6M4 20h16"/></svg></div>';
+let ver='';
+async function refresh(){if(document.hidden)return;try{const r=await fetch('state.json?v='+ver,{cache:'no-store'});
+$('st').textContent='Connected · Phone Drop';if(r.status===204)return;const s=await r.json();ver=String(s.version);
+$('files').innerHTML=s.files.length?s.files.map(x=>`<a class="row" href="f/${x.id}" download="${esc(x.name)}">
+<div class="ext">${IMG.test(x.name)?`<img src="f/${x.id}?view=1" loading="lazy" alt="">`:esc(ext(x.name))}</div>
+<div class="name"><b>${esc(x.name)}</b><span>${fmt(x.size)}</span></div>${DL}</a>`).join(''):'<div class="empty">Nothing yet. Drop files on Phone Drop on the laptop.</div>';
+$('zip').style.display=s.files.length>1?'inline':'none';
+$('textsec').style.display=s.texts.length?'block':'none';
+$('texts').innerHTML=s.texts.map((t,i)=>`<div class="row" style="align-items:flex-start"><textarea readonly rows="${Math.min(6,t.split('\n').length)}" id="t${i}">${esc(t)}</textarea>
+<button onclick="copyT(${i})">Copy</button></div>`).join('');}catch(e){$('st').textContent='Laptop not reachable · is Phone Drop still open?'}}
+function copyT(i){const t=$('t'+i);t.select();t.setSelectionRange(0,1e6);let ok=false;try{ok=document.execCommand('copy')}catch(e){}
+if(!ok&&navigator.clipboard)navigator.clipboard.writeText(t.value);toast('Copied')}
+$('pick').onchange=e=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;$('upsec').style.display='block';
+let left=files.length;const next=()=>{const f=files.shift();if(!f)return;const row=document.createElement('div');row.className='row';
+row.innerHTML=`<div class="ext">${esc(ext(f.name))}</div><div class="name"><b>${esc(f.name)}</b><span>${fmt(f.size)}</span><div class="bar"><i></i></div></div>`;
+$('ups').prepend(row);const bar=row.querySelector('i'),st=row.querySelector('span');const x=new XMLHttpRequest();
+x.open('PUT','up?name='+encodeURIComponent(f.name));x.upload.onprogress=ev=>{if(ev.lengthComputable)bar.style.width=(100*ev.loaded/ev.total)+'%%'};
+const done=ok=>{st.className=ok?'ok':'bad';st.textContent=ok?'On the laptop ✓':'Failed — try again';bar.parentNode.remove();
+if(--left===0&&ok)toast('Sent to the laptop');next()};x.onload=()=>done(x.status==200);x.onerror=()=>done(false);x.send(f)};
+next();next()};
+refresh();setInterval(refresh,2500);document.addEventListener('visibilitychange',refresh);
+</script></body></html>
+"""
 
 
 class _ZipStream:
@@ -190,6 +225,7 @@ def make_handler(share, colours):
                 return None, None, parts
             rest = seg[3:]
             share.last_use = time.time()
+            share.hello(self.client_address[0])
             if rest in ([], [""]):
                 return "page", None, parts
             if rest == ["state.json"]:
@@ -222,13 +258,17 @@ def make_handler(share, colours):
                 body = PAGE % dict(colours, host=html.escape(os.uname().nodename))
                 return self._send(200, body.encode(), "text/html; charset=utf-8")
             if kind == "state":
+                have = urllib.parse.parse_qs(_parts.query).get("v", [""])[0]
+                if have == str(share.version):
+                    return self._send(204)  # nothing new: no body
                 return self._send(200, json.dumps(share.state()).encode(), "application/json")
             if kind == "file":
                 with share.lock:
                     item = share.items.get(arg)
                 if not item:
                     return self._not_found()
-                return self._zip([item], item["name"]) if item["dir"] else self._file(arg, item)
+                inline = "view=1" in _parts.query
+                return self._zip([item], item["name"]) if item["dir"] else self._file(arg, item, inline)
             if kind == "zip":
                 with share.lock:
                     items = list(share.items.values())
@@ -241,7 +281,7 @@ def make_handler(share, colours):
             ascii_name = name.encode("ascii", "replace").decode().replace('"', "")
             return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{urllib.parse.quote(name)}'
 
-        def _file(self, item_id, item):
+        def _file(self, item_id, item, inline=False):
             try:
                 f = open(item["path"], "rb")
             except OSError:
@@ -249,9 +289,12 @@ def make_handler(share, colours):
             with f:
                 size = os.fstat(f.fileno()).st_size
                 self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
+                ctype = (mimetypes.guess_type(item["name"])[0] or "application/octet-stream") if inline \
+                    else "application/octet-stream"
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(size))
-                self.send_header("Content-Disposition", self._disposition(item["name"]))
+                if not inline:
+                    self.send_header("Content-Disposition", self._disposition(item["name"]))
                 self.end_headers()
                 if self.command == "HEAD":
                     return
@@ -260,8 +303,10 @@ def make_handler(share, colours):
                     self.wfile.write(chunk)
                     sent += len(chunk)
                     share.last_use = time.time()
-                    share.on_event("progress", (item_id, sent, size))
-                share.on_event("done", item_id)
+                    if not inline:
+                        share.on_event("progress", (item_id, sent, size))
+                if not inline:
+                    share.on_event("done", item_id)
 
         def _zip(self, items, name):
             self.send_response(200)
@@ -404,6 +449,48 @@ def _fmt_size(n):
         n /= 1024
 
 
+def phone_name(ip):
+    """'Motorola Edge 60 Pro' for a phone on the hotspot (from the hotspot guard's list)."""
+    try:
+        out = subprocess.run(["sudo", "-n", "/usr/local/sbin/hotspot-guard", "list"], capture_output=True,
+                             text=True, timeout=3).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == ip and parts[0] not in ("Connected", "Trusted:"):
+                return " ".join(w if w.isupper() else w.capitalize() for w in parts[0].replace("_", "-").split("-"))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "Your phone"
+
+
+def hotspot_wifi():
+    """(name, password) of the laptop's hotspot when it is on, else None."""
+    try:
+        active = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+                                capture_output=True, text=True, timeout=3).stdout
+        for line in active.splitlines():
+            name, ctype, _dev = (line.rsplit(":", 2) + ["", ""])[:3]
+            if ctype != "802-11-wireless":
+                continue
+            mode = subprocess.run(["nmcli", "-g", "802-11-wireless.mode", "connection", "show", name],
+                                  capture_output=True, text=True, timeout=3).stdout.strip()
+            if mode != "ap":
+                continue
+            ssid = subprocess.run(["nmcli", "-g", "802-11-wireless.ssid", "connection", "show", name],
+                                  capture_output=True, text=True, timeout=3).stdout.strip()
+            wifi_key = subprocess.run(["nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", name],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+            return ssid, wifi_key
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def wifi_qr_text(ssid, wifi_key):
+    esc = lambda v: "".join("\\" + c if c in '\\;,:"' else c for c in v)
+    return f"WIFI:T:WPA;S:{esc(ssid)};P:{esc(wifi_key)};;" if wifi_key else f"WIFI:T:nopass;S:{esc(ssid)};;"
+
+
 # ---------- the window ----------
 def main(argv):
     import gi
@@ -412,131 +499,187 @@ def main(argv):
     gi.require_version("Gtk", "4.0")
     gi.require_version("Gdk", "4.0")
     gi.require_version("GdkPixbuf", "2.0")
-    from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango
+    from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
     MOOD_DIR = os.path.join(GLib.get_user_config_dir(), "ubuntu_extension_marco", "mood")
     CSS = b"""
 :root { --mood-accent: #b1444d; --mood-light: #d0606a; --mood-bg: #0e0c0c;
-        --ink: #f2ebe3; --ink-2: rgba(230, 221, 211, 0.58); --ink-3: rgba(230, 221, 211, 0.38);
-        --line: rgba(255, 255, 255, 0.07); }
+        --ink: #f2ebe3; --ink-2: rgba(230, 221, 211, 0.6); --ink-3: rgba(230, 221, 211, 0.38);
+        --line: rgba(255, 255, 255, 0.07); --card: rgba(255, 255, 255, 0.035); }
 window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color: var(--ink); }
-.phonedrop .title { font-size: 17px; font-weight: 700; color: var(--ink); }
-.phonedrop .sub { font-size: 12px; color: var(--ink-3); }
-.phonedrop .qrcard { background: #f5eee6; border-radius: 18px; padding: 14px; }
-.phonedrop .url { font-family: monospace; font-size: 10.5px; color: var(--ink-2); }
-.phonedrop .section { font-size: 11px; font-weight: 600; color: var(--ink-3); margin-top: 6px; }
-.phonedrop .list { background: rgba(255, 255, 255, 0.03); border-radius: 12px; border: 1px solid var(--line); }
-.phonedrop .list row { background: transparent; padding: 6px 10px; border-radius: 10px; }
-.phonedrop .list row:hover { background: rgba(255, 255, 255, 0.03); }
+.phonedrop .logo { background: var(--mood-accent); color: #fff; border-radius: 12px; min-width: 38px; min-height: 38px;
+  box-shadow: 0 6px 18px alpha(var(--mood-accent), 0.4); }
+.phonedrop .title { font-size: 16px; font-weight: 700; }
+.phonedrop .sub { font-size: 11.5px; color: var(--ink-3); }
+.phonedrop .tabs { background: rgba(255, 255, 255, 0.05); border-radius: 10px; padding: 3px; }
+.phonedrop .tabs button { border-radius: 8px; padding: 3px 12px; min-height: 26px; border: none; box-shadow: none;
+  background: transparent; color: var(--ink-3); font-size: 12px; font-weight: 600; }
+.phonedrop .tabs button:checked { background: rgba(255, 255, 255, 0.10); color: var(--ink); }
+.phonedrop .qrcard { background: #f5eee6; border-radius: 22px; padding: 12px;
+  box-shadow: 0 0 0 6px alpha(var(--mood-accent), 0.18), 0 18px 40px rgba(0, 0, 0, 0.5); }
+.phonedrop .qrcard.live { box-shadow: 0 0 0 6px alpha(var(--mood-light), 0.55), 0 18px 40px rgba(0, 0, 0, 0.5); }
+.phonedrop .step { font-size: 13px; font-weight: 600; color: var(--ink); }
+.phonedrop .hint { font-size: 11.5px; color: var(--ink-3); }
+.phonedrop .pass { font-family: monospace; font-size: 12px; color: var(--ink-2); }
+.phonedrop .pill { border-radius: 99px; padding: 5px 12px; background: rgba(255, 255, 255, 0.05); }
+.phonedrop .pill.live { background: alpha(var(--mood-accent), 0.22); }
+.phonedrop .pilldot { min-width: 8px; min-height: 8px; border-radius: 99px; background: var(--ink-3); }
+.phonedrop .pill.live .pilldot { background: var(--mood-light); box-shadow: 0 0 8px var(--mood-light); }
+.phonedrop .pilltext { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.phonedrop .pill.live .pilltext { color: var(--ink); }
+.phonedrop .drop { border: 2px dashed rgba(255, 255, 255, 0.13); border-radius: 16px; padding: 16px; background: var(--card); }
+.phonedrop .drop:hover, .phonedrop.drop-hot .drop { border-color: var(--mood-light); background: alpha(var(--mood-accent), 0.10); }
+.phonedrop .droptitle { font-size: 13px; font-weight: 600; color: var(--ink); }
+.phonedrop .section { font-size: 11px; font-weight: 700; color: var(--ink-3); }
+.phonedrop .list { background: var(--card); border-radius: 14px; border: 1px solid var(--line); }
+.phonedrop .list row { background: transparent; padding: 7px 10px; }
 .phonedrop .name { font-size: 12.5px; color: var(--ink); }
 .phonedrop .meta { font-size: 11px; color: var(--ink-3); }
 .phonedrop .meta.ok { color: var(--mood-light); }
-.phonedrop .empty { font-size: 12px; color: var(--ink-3); padding: 12px; }
-.phonedrop .warn { font-size: 11.5px; color: var(--mood-light); }
-.phonedrop button { border-radius: 99px; padding: 4px 12px; min-height: 26px; border: none; box-shadow: none;
-  background: rgba(255, 255, 255, 0.08); color: var(--ink); font-size: 12px; font-weight: 600; }
-.phonedrop button:hover { background: rgba(255, 255, 255, 0.14); }
+.phonedrop .thumb { border-radius: 8px; }
+.phonedrop button.flat-btn { border-radius: 99px; padding: 3px 11px; min-height: 26px; border: none; box-shadow: none;
+  background: rgba(255, 255, 255, 0.07); color: var(--ink); font-size: 12px; font-weight: 600; }
+.phonedrop button.flat-btn:hover { background: rgba(255, 255, 255, 0.13); }
 .phonedrop button.accent { background: var(--mood-accent); color: #fff; }
 .phonedrop button.accent:hover { background: var(--mood-light); }
-.phonedrop button.small { padding: 2px 9px; min-height: 22px; font-size: 11px; }
-.phonedrop dropdown button { padding: 2px 10px; }
+.phonedrop button.link { background: transparent; color: var(--mood-light); padding: 0 4px; min-height: 20px;
+  border: none; box-shadow: none; font-size: 11.5px; font-weight: 600; }
+.phonedrop dropdown > button { border-radius: 99px; padding: 0 8px; min-height: 22px; border: none; box-shadow: none;
+  background: rgba(255, 255, 255, 0.06); color: var(--ink-2); font-size: 11px; }
 .phonedrop progressbar trough { min-height: 3px; background: rgba(255, 255, 255, 0.08); border-radius: 2px; }
 .phonedrop progressbar progress { min-height: 3px; background: var(--mood-light); border-radius: 2px; }
-.phonedrop.drop-hot { box-shadow: inset 0 0 0 2px var(--mood-light); }
+.phonedrop scrollbar slider { background: rgba(255, 255, 255, 0.14); min-width: 4px; }
 """
 
-    def _value(gtype, obj):
-        v = GObject.Value()
-        v.init(gtype)
-        v.set_boxed(obj)
-        return v
+    def qr_texture(text, scale=6):
+        png = subprocess.run(["qrencode", "-t", "PNG", "-s", str(scale), "-m", "0", "-l", "L",
+                              "--foreground=0E0C0C", "--background=F5EEE6", "-o", "-", text],
+                             capture_output=True, timeout=5, check=True).stdout
+        loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+        loader.write(png)
+        loader.close()
+        return Gdk.Texture.new_for_pixbuf(loader.get_pixbuf())
 
     def notify(title, body=""):
         tool = os.path.join(os.path.expanduser("~"), ".local", "bin", "notify")
-        argv_ = [tool if os.access(tool, os.X_OK) else "notify-send", "-i", "phone-symbolic", title, body]
         try:
-            Gio.Subprocess.new(argv_, Gio.SubprocessFlags.NONE)
+            Gio.Subprocess.new([tool if os.access(tool, os.X_OK) else "notify-send", "-i", "phone-symbolic",
+                                title, body], Gio.SubprocessFlags.NONE)
         except GLib.Error:
             pass
+
+    def btn(label, cb, *classes):
+        b = Gtk.Button(label=label)
+        b.add_css_class("flat-btn")
+        for c in classes:
+            b.add_css_class(c)
+        b.connect("clicked", lambda *_: cb())
+        return b
+
+    def label(text, css, **kw):
+        lbl = Gtk.Label(label=text, **kw)
+        lbl.add_css_class(css)
+        return lbl
 
     class Window(Gtk.ApplicationWindow):
         def __init__(self, app):
             super().__init__(application=app, title="Phone Drop")
-            self.set_default_size(420, 640)
+            self.set_default_size(400, 640)
             self.add_css_class("phonedrop")
-            self.rows = {}  # item id -> (meta label, progress bar)
+            self.rows = {}
             self.share = Share(lambda kind, data: GLib.idle_add(self._event, kind, data))
             self.server = Server(self.share, mood_colours())
             self.addrs = []
-            self.connected = False
+            self.wifi = None  # (name, password) of the hotspot, read in the background
 
-            root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
             for m in ("top", "bottom", "start", "end"):
-                getattr(root, f"set_margin_{m}")(18)
-            scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+                getattr(root, f"set_margin_{m}")(20)
+            scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True)
             scroll.set_child(root)
             self.set_child(scroll)
 
-            head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            t = Gtk.Label(label="Phone Drop", xalign=0)
-            t.add_css_class("title")
-            self.sub = Gtk.Label(label="Scan with your phone's camera", xalign=0)
-            self.sub.add_css_class("sub")
-            head.append(t)
-            head.append(self.sub)
+            # header: logo, title, network
+            head = Gtk.Box(spacing=12)
+            logo = Gtk.Image(icon_name="phone-symbolic", pixel_size=20)
+            logo.add_css_class("logo")
+            titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, hexpand=True)
+            titles.append(label("Phone Drop", "title", xalign=0))
+            titles.append(label("Files to and from your phone — no app needed", "sub", xalign=0))
+            self.addr_box = Gtk.DropDown(valign=Gtk.Align.CENTER, tooltip_text="Network the phone uses")
+            self.addr_box.connect("notify::selected", lambda *_: self._restart())
+            head.append(logo)
+            head.append(titles)
+            head.append(self.addr_box)
             root.append(head)
 
-            card = Gtk.Box(halign=Gtk.Align.CENTER)
-            card.add_css_class("qrcard")
+            # two steps: join the hotspot, open the page (folds away once the phone is connected)
+            qr_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+            self.qr_area = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
+                                        transition_duration=220, reveal_child=True)
+            self.qr_area.set_child(qr_box)
+            tabs = Gtk.Box(halign=Gtk.Align.CENTER)
+            tabs.add_css_class("tabs")
+            self.tab_wifi = Gtk.ToggleButton(label="1  Join Wi-Fi")
+            self.tab_page = Gtk.ToggleButton(label="2  Open Phone Drop", group=self.tab_wifi, active=True)
+            self.tab_wifi.connect("toggled", lambda b: self._show_qr())
+            tabs.append(self.tab_wifi)
+            tabs.append(self.tab_page)
+            qr_box.append(tabs)
+
+            self.qrcard = Gtk.Box(halign=Gtk.Align.CENTER)
+            self.qrcard.add_css_class("qrcard")
             self.qr = Gtk.Picture(can_shrink=False)
-            card.append(self.qr)
-            root.append(card)
+            self.qrcard.append(self.qr)
+            qr_box.append(self.qrcard)
+            self.step = label("", "step", justify=Gtk.Justification.CENTER, wrap=True)
+            qr_box.append(self.step)
+            self.step2 = label("", "hint", justify=Gtk.Justification.CENTER, wrap=True, selectable=True)
+            qr_box.append(self.step2)
+            root.append(self.qr_area)
 
-            self.url = Gtk.Label(selectable=True, wrap=True, wrap_mode=Pango.WrapMode.CHAR, justify=Gtk.Justification.CENTER)
-            self.url.add_css_class("url")
-            root.append(self.url)
+            self.pill = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+            self.pill.add_css_class("pill")
+            dot = Gtk.Box(valign=Gtk.Align.CENTER)
+            dot.add_css_class("pilldot")
+            self.pilltext = label("Waiting for your phone", "pilltext")
+            self.pill.append(dot)
+            self.pill.append(self.pilltext)
+            self.show_code = Gtk.Button(label="Show code", visible=False)
+            self.show_code.add_css_class("link")
+            self.show_code.connect("clicked", lambda *_: self._fold_qr(False))
+            self.pill.append(self.show_code)
+            root.append(self.pill)
 
-            pick = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
-            self.addr_box = Gtk.DropDown()
-            self.addr_box.connect("notify::selected", lambda *_: self._restart())
-            copy = Gtk.Button(label="Copy link")
-            copy.connect("clicked", lambda *_: (self.get_display().get_clipboard().set(self.server.url),
-                                                self.sub.set_label("Link copied")))
-            pick.append(self.addr_box)
-            pick.append(copy)
-            root.append(pick)
-            self.warn = Gtk.Label(wrap=True, xalign=0, visible=False)
-            self.warn.add_css_class("warn")
-            root.append(self.warn)
-
-            sh = Gtk.Box(spacing=8)
-            l1 = Gtk.Label(label="Sharing", xalign=0, hexpand=True)
-            l1.add_css_class("section")
-            add = Gtk.Button(label="Add files")
-            add.add_css_class("small")
-            add.connect("clicked", lambda *_: self._pick_files())
-            sh.append(l1)
-            sh.append(add)
-            root.append(sh)
-            self.shared = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+            # send: one drop zone that becomes the list of shared files
+            self.drop = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            self.drop.add_css_class("drop")
+            dz_head = Gtk.Box(spacing=10)
+            dz_head.append(Gtk.Image(icon_name="document-send-symbolic", pixel_size=22))
+            dz_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            self.drop_title = label("Drop files here to send", "droptitle", xalign=0)
+            dz_text.append(self.drop_title)
+            dz_text.append(label("or Choose, or Ctrl+V · they appear on the phone at once", "hint", xalign=0))
+            dz_head.append(dz_text)
+            dz_head.append(btn("Choose", self._pick_files))
+            self.drop.append(dz_head)
+            self.shared = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, visible=False)
             self.shared.add_css_class("list")
-            self.shared.set_placeholder(self._empty("Drop files here, or press Add files"))
-            root.append(self.shared)
+            self.drop.append(self.shared)
+            root.append(self.drop)
 
-            l2 = Gtk.Label(label="Received from the phone", xalign=0)
-            l2.add_css_class("section")
-            root.append(l2)
-            self.received = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+            # receive
+            self.recv_head = Gtk.Box(visible=False)
+            self.recv_head.append(label("RECEIVED FROM THE PHONE", "section", xalign=0, hexpand=True))
+            self.recv_head.append(btn("Open folder", self._open_inbox))
+            root.append(self.recv_head)
+            self.received = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, visible=False)
             self.received.add_css_class("list")
-            self.received.set_placeholder(self._empty("On the phone: Upload to laptop"))
             root.append(self.received)
 
-            foot = Gtk.Box(spacing=8, margin_top=6)
-            self.status = Gtk.Label(xalign=0, hexpand=True, wrap=True)
-            self.status.add_css_class("sub")
-            self.stop_btn = Gtk.Button(label="Stop")
-            self.stop_btn.add_css_class("accent")
-            self.stop_btn.connect("clicked", lambda *_: self._toggle_server())
+            foot = Gtk.Box(spacing=8)
+            self.status = label("", "hint", xalign=0, hexpand=True, wrap=True)
+            self.stop_btn = btn("Stop", self._toggle_server)
             foot.append(self.status)
             foot.append(self.stop_btn)
             root.append(foot)
@@ -547,21 +690,20 @@ window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color
             drop.connect("leave", lambda *_: self.remove_css_class("drop-hot"))
             self.add_controller(drop)
             self.connect("close-request", self._on_close)
+            keys = Gtk.EventControllerKey()
+            keys.connect("key-pressed", self._on_key)
+            self.add_controller(keys)
 
             self._load_addresses()
+            threading.Thread(target=self._read_hotspot, daemon=True).start()
             GLib.timeout_add_seconds(30, self._idle_check)
-            GLib.timeout_add_seconds(45, self._firewall_hint)
 
-        def _empty(self, text):
-            lbl = Gtk.Label(label=text)
-            lbl.add_css_class("empty")
-            return lbl
-
-        # ----- server / address -----
+        # ----- network + QR -----
         def _load_addresses(self):
             self.addrs = addresses()
-            labels = [a[0] for a in self.addrs] or ["No network"]
+            labels = [a[0].split(" (")[0] for a in self.addrs] or ["No network"]
             self.addr_box.set_model(Gtk.StringList.new(labels))
+            self.addr_box.set_visible(len(self.addrs) > 1)
             self.addr_box.set_selected(0)
             self._restart()
 
@@ -569,9 +711,7 @@ window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color
             i = self.addr_box.get_selected()
             if not self.addrs or i >= len(self.addrs):
                 self.server.stop()
-                self.qr.set_paintable(None)
-                self.url.set_label("")
-                self.status.set_label("Not connected to any network. Turn on the hotspot or Wi-Fi.")
+                self._show_qr()
                 return
             if self.server.httpd and self.server.ip == self.addrs[i][1]:
                 return  # already serving there (picking the first address also fires this)
@@ -580,34 +720,122 @@ window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color
             except OSError as e:
                 self.status.set_label(f"Can't start: {e.strerror}")
                 return
-            self._render_qr()
             self.stop_btn.set_label("Stop")
-            self.status.set_label("Waiting for your phone…  Stops by itself after 15 idle minutes.")
+            self.status.set_label("Stops by itself after 15 minutes without use.")
+            self._show_qr()
 
-        def _render_qr(self):
-            url = self.server.url
-            self.url.set_label(url)
+        def _read_hotspot(self):
+            """In the background: hotspot name/password, and whether a phone is already on it."""
+            wifi = hotspot_wifi()
+            phones = 0
             try:
-                png = subprocess.run(["qrencode", "-t", "PNG", "-s", "7", "-m", "1", "-l", "M",
-                                      "--foreground=0E0C0C", "--background=F5EEE6", "-o", "-", url],
-                                     capture_output=True, timeout=5).stdout
-                loader = GdkPixbuf.PixbufLoader.new_with_type("png")
-                loader.write(png)
-                loader.close()
-                self.qr.set_paintable(Gdk.Texture.new_for_pixbuf(loader.get_pixbuf()))
-            except (OSError, GLib.Error, subprocess.SubprocessError):
+                out = subprocess.run(["ip", "neigh", "show", "dev", "wlo1"], capture_output=True, text=True,
+                                     timeout=3).stdout
+                phones = sum(1 for line in out.splitlines() if "REACHABLE" in line or "STALE" in line)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            GLib.idle_add(self._hotspot_ready, wifi, phones)
+
+        def _hotspot_ready(self, wifi, phones):
+            self.wifi = wifi
+            # nobody on the hotspot yet: start with "join the hotspot"
+            if wifi and self._on_hotspot() and not phones and not self.share.seen:
+                self.tab_wifi.set_active(True)
+            self._show_qr()
+            return GLib.SOURCE_REMOVE
+
+        def _fold_qr(self, fold):
+            self.qr_area.set_reveal_child(not fold)
+            self.show_code.set_visible(fold)
+
+        def _on_key(self, _c, keyval, _code, state):
+            ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+            if keyval == Gdk.KEY_Escape:
+                self.close()
+                return True
+            if ctrl and keyval in (Gdk.KEY_v, Gdk.KEY_V):
+                self._paste()
+                return True
+            return False
+
+        def _paste(self):
+            """Ctrl+V: share whatever was copied - files, a picture (screenshot) or text."""
+            cb = self.get_display().get_clipboard()
+            fmts = cb.get_formats()
+
+            def got_files(c, res):
+                try:
+                    self.add_paths([f.get_path() for f in c.read_value_finish(res).get_files() if f.get_path()])
+                except GLib.Error:
+                    pass
+
+            def got_texture(c, res):
+                try:
+                    tex = c.read_texture_finish(res)
+                except GLib.Error:
+                    return
+                folder = os.path.join(GLib.get_user_runtime_dir(), "phone-drop")
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, time.strftime("Pasted %Y-%m-%d %H-%M-%S.png"))
+                tex.save_to_png(path)
+                self.add_paths([path])
+
+            def got_text(c, res):
+                try:
+                    text = c.read_text_finish(res)
+                except GLib.Error:
+                    return
+                if text:
+                    self.share.add_text(text)
+                    self.status.set_label("Text shared - it's on the phone page")
+
+            if fmts.contain_gtype(Gdk.FileList):
+                cb.read_value_async(Gdk.FileList, GLib.PRIORITY_DEFAULT, None, got_files)
+            elif fmts.contain_gtype(Gdk.Texture):
+                cb.read_texture_async(None, got_texture)
+            else:
+                cb.read_text_async(None, got_text)
+
+        def _on_hotspot(self):
+            i = self.addr_box.get_selected()
+            return bool(self.addrs) and i < len(self.addrs) and self.addrs[i][0].startswith("Hotspot")
+
+        def _show_qr(self):
+            wifi_step = self.tab_wifi.get_active()
+            self.tab_wifi.set_visible(bool(self.wifi) and self._on_hotspot())
+            try:
+                if wifi_step and self.wifi:
+                    ssid, wifi_key = self.wifi
+                    self.qr.set_paintable(qr_texture(wifi_qr_text(ssid, wifi_key), 6))
+                    self.step.set_label(f"Scan to join the hotspot “{ssid}”")
+                    self.step2.set_label(f"Password: {wifi_key}" if wifi_key else "No password")
+                    self.step2.remove_css_class("hint")
+                    self.step2.add_css_class("pass")
+                elif self.server.httpd:
+                    self.qr.set_paintable(qr_texture(self.server.url, 6))
+                    self.step.set_label("Scan with the phone's camera")
+                    hint = ("Phone on another network? Tap “1 Join Wi-Fi” first.\n" if self.tab_wifi.get_visible()
+                            else "The phone must be on the same Wi-Fi as the laptop.\n")
+                    self.step2.set_label(hint + "Page won't open? Turn off mobile data on the phone.")
+                    self.step2.remove_css_class("pass")
+                    self.step2.add_css_class("hint")
+                else:
+                    self.qr.set_paintable(None)
+                    self.step.set_label("Not connected to any network")
+                    self.step2.set_label("Turn on the hotspot (Super+Shift+H) or connect to Wi-Fi.")
+            except (OSError, subprocess.SubprocessError, GLib.Error):
                 self.qr.set_paintable(None)
-                self.warn.set_label("QR code needs qrencode:  sudo apt install qrencode   (the link above works too)")
-                self.warn.set_visible(True)
+                self.step.set_label("QR codes need qrencode: sudo apt install qrencode")
+                self.step2.set_label(self.server.url if self.server.httpd else "")
 
         def _toggle_server(self):
             if self.server.httpd:
                 self.server.stop()
-                self.qr.set_opacity(0.15)
+                self.qrcard.set_opacity(0.2)
                 self.stop_btn.set_label("Start again")
                 self.status.set_label("Stopped. The link no longer works.")
             else:
-                self.qr.set_opacity(1)
+                self.qrcard.set_opacity(1)
                 self._restart()
 
         def _idle_check(self):
@@ -615,13 +843,6 @@ window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color
                 self._toggle_server()
                 self.status.set_label("Stopped after 15 minutes without use.")
             return GLib.SOURCE_CONTINUE
-
-        def _firewall_hint(self):
-            if self.server.httpd and not self.connected:
-                self.warn.set_label("Phone can't open the page? Make sure it's on the same Wi-Fi or your hotspot. "
-                                    "With the firewall on, the system part of the installer adds the Phone Drop rule.")
-                self.warn.set_visible(True)
-            return GLib.SOURCE_REMOVE
 
         def _on_close(self, *_):
             self.server.stop()
@@ -638,93 +859,114 @@ window.phonedrop { background: var(--mood-bg); font-family: "Ubuntu Sans"; color
             return True
 
         def _pick_files(self):
-            dlg = Gtk.FileDialog(title="Share with the phone")
-
             def done(d, res):
                 try:
                     files = d.open_multiple_finish(res)
                 except GLib.Error:
                     return
                 self.add_paths([files.get_item(i).get_path() for i in range(files.get_n_items())])
+            Gtk.FileDialog(title="Send to the phone").open_multiple(self, None, done)
 
-            dlg.open_multiple(self, None, done)
+        def _open_inbox(self):
+            os.makedirs(INBOX, exist_ok=True)
+            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(INBOX).get_uri(),
+                                               self.get_display().get_app_launch_context())
 
-        def _file_row(self, name, sub, path, buttons):
+        def _icon(self, path, size=30):
+            try:
+                if (mimetypes.guess_type(path)[0] or "").startswith("image/"):  # photos: a small preview
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                    pic = Gtk.Picture.new_for_paintable(Gdk.Texture.new_for_pixbuf(pb))
+                    pic.set_size_request(size, size)
+                    pic.add_css_class("thumb")
+                    return pic
+                info = Gio.File.new_for_path(path).query_info("standard::icon", Gio.FileQueryInfoFlags.NONE, None)
+                img = Gtk.Image.new_from_gicon(info.get_icon())
+            except GLib.Error:
+                img = Gtk.Image.new_from_icon_name("text-x-generic")
+            img.set_pixel_size(size - 4)
+            return img
+
+        def _row(self, name, sub, path, buttons):
             row = Gtk.ListBoxRow()
             box = Gtk.Box(spacing=10)
-            try:
-                info = Gio.File.new_for_path(path).query_info("standard::icon", Gio.FileQueryInfoFlags.NONE, None)
-                icon = Gtk.Image.new_from_gicon(info.get_icon())
-            except GLib.Error:
-                icon = Gtk.Image.new_from_icon_name("text-x-generic")
-            icon.set_pixel_size(26)
-            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-            n = Gtk.Label(label=name, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-            n.add_css_class("name")
-            meta = Gtk.Label(label=sub, xalign=0)
-            meta.add_css_class("meta")
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True, valign=Gtk.Align.CENTER)
+            text.append(label(name, "name", xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE))
+            meta = label(sub, "meta", xalign=0)
             bar = Gtk.ProgressBar(visible=False)
-            text.append(n)
             text.append(meta)
             text.append(bar)
-            box.append(icon)
+            box.append(self._icon(path))
             box.append(text)
             for b in buttons:
                 box.append(b)
             row.set_child(box)
             return row, meta, bar
 
+        def _connected(self, who):
+            first = not self.pill.has_css_class("live")
+            self.pill.add_css_class("live")
+            self.qrcard.add_css_class("live")
+            self.pilltext.set_label(f"{who} connected")
+            if first:  # the code did its job: fold it away and give the files the room
+                GLib.timeout_add(900, lambda: self._fold_qr(True) or False)
+            return GLib.SOURCE_REMOVE
+
         def _event(self, kind, data):
-            if kind == "added":
+            if kind == "hello":
+                ip = data
+                self._connected("Phone")
+                # the name lookup runs a helper: keep it off the main loop
+                threading.Thread(target=lambda: GLib.idle_add(self._connected, phone_name(ip)),
+                                 daemon=True).start()
+            elif kind == "added":
                 it = self.share.items[data]
-                rm = Gtk.Button(label="✕")
-                rm.add_css_class("small")
-                row, meta, bar = self._file_row(it["name"], f"{_fmt_size(it['size'])} · waiting", it["path"], [rm])
+                rm = Gtk.Button(icon_name="window-close-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Stop sharing")
+                rm.add_css_class("flat-btn")
+                row, meta, bar = self._row(it["name"], f"{_fmt_size(it['size'])} · ready on the phone", it["path"], [rm])
                 rm.connect("clicked", lambda *_: self._remove(data, row))
                 self.rows[data] = (meta, bar)
                 self.shared.append(row)
+                self.shared.set_visible(True)
+                self.drop_title.set_label("Drop more files to send")
             elif kind == "progress":
-                self.connected = True
-                self.warn.set_visible(False)
                 item_id, sent, size = data
                 if item_id in self.rows:
                     meta, bar = self.rows[item_id]
                     bar.set_visible(True)
                     bar.set_fraction(min(1.0, sent / max(1, size)))
                     meta.remove_css_class("ok")
-                    meta.set_label(f"Sending {int(100 * sent / max(1, size))}%")
-                self.status.set_label("Phone connected")
+                    meta.set_label(f"Sending · {int(100 * sent / max(1, size))}%")
             elif kind == "done":
                 if data in self.rows:
                     meta, bar = self.rows[data]
                     bar.set_visible(False)
-                    meta.set_label("Sent to the phone ✓")
+                    meta.set_label("On the phone ✓")
                     meta.add_css_class("ok")
             elif kind == "received":
-                self.connected = True
-                self.warn.set_visible(False)
                 path = data
-                open_b = Gtk.Button(label="Open")
-                open_b.add_css_class("small")
-                show_b = Gtk.Button(label="Show")
-                show_b.add_css_class("small")
                 uri = Gio.File.new_for_path(path).get_uri()
                 ctx = self.get_display().get_app_launch_context()
-                open_b.connect("clicked", lambda *_: Gio.AppInfo.launch_default_for_uri(uri, ctx))
-                show_b.connect("clicked", lambda *_: Gio.AppInfo.create_from_commandline(
+                open_b = btn("Open", lambda: Gio.AppInfo.launch_default_for_uri(uri, ctx))
+                show_b = btn("Show", lambda: Gio.AppInfo.create_from_commandline(
                     "nautilus --select", "Files", Gio.AppInfoCreateFlags.SUPPORTS_URIS).launch_uris([uri], ctx))
-                row, _m, _b = self._file_row(os.path.basename(path), f"{_fmt_size(os.path.getsize(path))} · just now",
-                                             path, [open_b, show_b])
+                for b in (open_b, show_b):
+                    b.set_valign(Gtk.Align.CENTER)
+                row, _m, _b = self._row(os.path.basename(path), f"{_fmt_size(os.path.getsize(path))} · just now",
+                                        path, [open_b, show_b])
                 self.received.prepend(row)
-                self.status.set_label("Phone connected")
+                self.received.set_visible(True)
+                self.recv_head.set_visible(True)
                 notify("Received from your phone", os.path.basename(path))
             return GLib.SOURCE_REMOVE
 
         def _remove(self, item_id, row):
-            with self.share.lock:
-                self.share.items.pop(item_id, None)
+            self.share.remove(item_id)
             self.rows.pop(item_id, None)
             self.shared.remove(row)
+            if not self.share.items:
+                self.shared.set_visible(False)
+                self.drop_title.set_label("Drop files here to send")
 
     class App(Gtk.Application):
         def __init__(self):
