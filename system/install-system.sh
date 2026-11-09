@@ -53,6 +53,21 @@ put "$SRC/journald/size.conf" /etc/systemd/journald.conf.d/size.conf 644
 systemctl restart systemd-journald
 command -v snap >/dev/null && snap set system refresh.retain=2
 
+step "File index for the Super+F file finder (plocate)"
+# Refreshed every 15 minutes on the charger, hourly on battery, and right after every
+# apt install/remove. The finder itself watches home and USB drives live in between.
+put "$SRC/sbin/file-index-due" /usr/local/sbin/file-index-due 755
+put "$SRC/file-finder/often.conf" /etc/systemd/system/plocate-updatedb.timer.d/often.conf 644
+put "$SRC/file-finder/battery.conf" /etc/systemd/system/plocate-updatedb.service.d/battery.conf 644
+rm -f /etc/systemd/system/plocate-updatedb.service.d/battery-too.conf   # older version of battery.conf
+put "$SRC/file-finder/99file-finder-index" /etc/apt/apt.conf.d/99file-finder-index 644
+# "Protected files" mode: a root helper the finder starts with one password popup.
+put "$SRC/sbin/file-finder-root" /usr/local/sbin/file-finder-root 755
+put "$SRC/file-finder/io.arco.file-finder.policy" /usr/share/polkit-1/actions/io.arco.file-finder.policy 644
+systemctl daemon-reload
+systemctl enable --now plocate-updatedb.timer
+systemctl start --no-block plocate-updatedb.service
+
 step "Weekly system tidy (Sundays)"
 put "$SRC/sbin/weekly-tidy-root" /usr/local/sbin/weekly-tidy-root 755
 put "$SRC/systemd/weekly-tidy-root.service" /etc/systemd/system/weekly-tidy-root.service 644

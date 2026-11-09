@@ -106,6 +106,7 @@ run systemctl --user mask localsearch-3.service localsearch-control-3.service \
 
 step "Startup items"
 put "$REPO/autostart/login-sound.desktop" "$HOME/.config/autostart/login-sound.desktop"
+put_rendered "$REPO/autostart/file-finder.desktop" "$HOME/.config/autostart/file-finder.desktop" 644
 for f in "$REPO"/autostart/disabled/*.desktop; do put "$f" "$HOME/.config/autostart/$(basename "$f")"; done
 
 step "Ambient mode (Alt+Q)"

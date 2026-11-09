@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=File Finder
+Comment=Starts the Super+F file finder hidden, so it opens instantly
+Exec=@HOME@/.local/bin/file-finder --background
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

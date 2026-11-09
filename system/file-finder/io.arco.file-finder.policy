@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Password popup for the Super+F File Finder's "protected files" mode. -->
+<policyconfig>
+  <action id="io.arco.file-finder.search-protected">
+    <description>Search protected files</description>
+    <message>File Finder wants to include protected files (other users' folders, /root, system data) in its results</message>
+    <icon_name>system-search</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/file-finder-root</annotate>
+  </action>
+</policyconfig>

@@ -45,6 +45,7 @@ Things you add yourself (deliberately not in the repo):
 | **Terminal Copy on Select** | Selecting text in a terminal copies it to the clipboard |
 | **Drop Shelf** | A hidden Mac-style shelf at the top center: rest the cursor at the top edge (or drag something there) and it slides out. Drop files, images or text on it, then drag them into any other window |
 | **Drag Switch** | While dragging from any app: hold over a dock icon to bring that app's window forward (even on another workspace), hold at the left/right screen edge to switch workspace, push to the dock edge to reveal a hidden dock |
+| **Wallpaper Mood** | The accent colour follows the wallpaper: change the wallpaper and the dock dots, notification badges, click ripple, charging ring, hotspot and screenshot cards, drag bar, Drop Shelf and File Finder all recolour to its most vivid colour within a second. `wallpaper-mood fixed` goes back to the fixed crimson, `wallpaper-mood auto` follows the wallpaper again |
 
 ### Desktop effects and add-ons (`extensions/third-party/`)
 These are exact copies of the installed versions, including my small tweak to Dynamic Music Pill: the visualizer glows in the album cover's color, and the pill also shows on the lock screen. Each one keeps its original license.
@@ -81,6 +82,7 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `Super+Shift+V` | VPN quick switch (off → college VPN → Proton → off) |
 | `Super+Shift+F` | Fix sound |
 | `Super+Shift+H` / `Super+Shift+A` | Hotspot toggle / Stay Awake toggle (quick settings) |
+| `Super+F` | File finder: one box for files, apps and commands. Type to search every file and app on the computer (Enter opens, Ctrl+Enter shows in Files, drag a result into any app; about 0.1s per search). Type `>` for the command bar: `> wifi off`, `> vpn college`, `> kill chrome`, `> timer 25`, `> calc 18*42`, `> volume 40`, `> dark`, `> lock`. Tab searches inside PDFs, documents and code in Documents and Downloads |
 | `Super+F5` | Windows-style refresh (flash + quick health check) |
 | `Super+V` | Clipboard history |
 | `Super+Q` | Show the dock |
@@ -107,6 +109,8 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `weekly-tidy` | Weekly cleanup with a report |
 | `welcome` | Terminal welcome screen: greeting, status chips, weather, a quote |
 | `drop-shelf` | The Drop Shelf app (started and positioned by the Drop Shelf extension) |
+| `file-finder` | The Super+F file finder (starts hidden at login). Searches the system file index (refreshed every 15 min on the charger, hourly on battery, and after every apt install), watches the home folder and USB drives live so brand-new files show at once, indexes each USB drive when plugged in, and hides deleted files. The lock button (Ctrl+Shift+A) also searches protected files after one password popup |
+| `wallpaper-mood` | Works out the accent colours from the wallpaper (the Wallpaper Mood extension runs it when the wallpaper changes) |
 
 ### Background services (`systemd/user/`)
 `power-auto`, `headphone-magic`, `fix-audio-login`, `organize-downloads` (path + daily timer), `session-keeper` (save every 2 min + restore at login), `weekly-tidy` (Sundays) and `ambient` (idle monitor, off by default). File indexing (localsearch/tracker) is switched off.

@@ -1,0 +1,2 @@
+// Super+F file finder: refresh the file index right after packages are installed or removed.
+DPkg::Post-Invoke { "if [ -x /usr/sbin/updatedb.plocate ]; then systemd-run --quiet --no-block --collect --unit=file-index-after-apt -p IOSchedulingClass=idle -p Nice=19 /usr/sbin/updatedb.plocate >/dev/null 2>&1 || true; fi"; };

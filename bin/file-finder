@@ -1,0 +1,1756 @@
+#!/usr/bin/env python3
+"""File Finder - one box for files, apps and commands (Super+F).
+
+  * type                         -> files and folders from the whole disk, and matching apps
+  * a sum (18*42)                -> the answer on top; Enter copies it
+  * > command                    -> command bar: > wifi off, > vpn college, > kill chrome,
+                                    > timer 25, > calc 18*42, > volume 40, > dark, > lock ...
+                                    (type > on its own to see them all)
+  * Tab                          -> search inside files (PDF, Word/Excel/PowerPoint/LibreOffice,
+                                    notes, code) in Documents and Downloads; Tab again goes back
+  * Up / Down                    -> move through the results
+  * Enter / double-click         -> open / start / run
+  * Ctrl+Enter                   -> show it in Files
+  * Ctrl+C (nothing selected)    -> copy the path
+  * Ctrl+Shift+A / lock button   -> also search protected files (asks for your password)
+  * drag a result                -> drop it into any app (or onto the Drop Shelf)
+  * Esc / click elsewhere        -> hide
+
+Where results come from:
+  * the system-wide plocate index (refreshed every 15 minutes on the charger, hourly on
+    battery, and right after every apt install/remove)
+  * a live watch on the home folder, so a file made a second ago is found at once
+  * one index per USB drive, built as soon as the drive is plugged in, plus a live watch
+  * protected mode: a root helper started with one password popup (pkexec) searches the
+    files your user can't see (other users, /root, system data); it quits after 10 idle minutes
+Files deleted since the last index refresh are left out.
+The inside-files index (~/.cache/file-finder/content.db, SQLite full-text) is built in the
+background at the lowest priority and kept up to date live by the same watch.
+
+Stays running in the background (started hidden at login) so Super+F opens it instantly;
+Super+F again hides it.
+"""
+import ast
+import ctypes
+import html
+import json
+import math
+import os
+import queue
+import re
+import sqlite3
+import struct
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import zipfile
+
+import gi
+# Software drawing: this window is simple, and the GPU renderer costs ~65 MB more memory
+# on this laptop and draws its first frame slower. Override with GSK_RENDERER=gl.
+os.environ.setdefault("GSK_RENDERER", "cairo")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+APP_ID = "io.arco.FileFinder"
+HOME = os.path.expanduser("~")
+DB = "/var/lib/plocate/plocate.db"
+DRIVE_DBS = os.path.join(GLib.get_user_cache_dir(), "file-finder", "drives")
+ROOT_HELPER = "/usr/local/sbin/file-finder-root"
+DRIVE_ROOTS = ("/media/", "/run/media/")
+SHOW = 60          # rows shown
+NAME_LIMIT = 4000  # candidates whose file name matches
+PATH_LIMIT = 1500  # candidates that only match somewhere in the path (whole disk / home)
+DRIVE_REFRESH_S = 15 * 60
+MAX_WATCHES = 25000  # the per-user inotify limit (65536) is shared with editors etc.
+NOISE = ("/.cache/", "/node_modules/", "/.git/", "/site-packages/", "/dist-packages/",
+         "/__pycache__/", "/.venv/", "/venv/", "/.local/share/uv/", "/.cargo/registry/", "/.rustup/",
+         "/.npm/", "/.local/share/Trash/", "/.vscode/extensions/", "/.antigravity", "/proc/", "/sys/",
+         "/snap/", "/var/lib/", "/usr/share/doc/", "/usr/share/locale/", "/usr/src/", "/.mozilla/",
+         "/.config/google-chrome/")
+USER_DIRS = ("/Documents/", "/Downloads/", "/Desktop/", "/Pictures/", "/Music/", "/Videos/")
+# folders not watched live (busy caches and tool data; the index still covers them)
+NO_WATCH = {"node_modules", ".git", ".cache", "__pycache__", ".venv", "venv", "site-packages",
+            ".cargo", ".rustup", ".npm", ".gradle", ".m2", ".local", "snap", ".vscode",
+            ".antigravity", ".antigravity-ide", ".mozilla", ".config", "Trash", ".android",
+            "Android", ".pub-cache", ".dartServer", ".nuget", ".conda", "miniconda3",
+            "anaconda3", "go", ".java", ".Trash-1000", "$RECYCLE.BIN", "System Volume Information"}
+
+CSS = b"""
+/* Wallpaper Mood colours (defaults = the original "I Found You" palette; the live
+   values come from ~/.config/ubuntu_extension_marco/mood/gtk.css) */
+:root { --mood-accent: #b1444d; --mood-light: #d0606a; --mood-dark: #8e2a32; --mood-bg: #0e0c0c;
+        --ink: #f2ebe3; --ink-2: rgba(230, 221, 211, 0.58); --ink-3: rgba(230, 221, 211, 0.38);
+        --line: rgba(255, 255, 255, 0.07); }
+
+/* the window covers the screen: a light dim behind a floating panel; a click on the dim closes it */
+window.finder, window.finder.background { background: transparent; box-shadow: none; border: none;
+  font-family: "Ubuntu Sans"; }
+window.finder decoration { background: transparent; box-shadow: none; border: none; }
+window.finder .backdrop { background: rgba(0, 0, 0, 0.22); }
+window.finder .panel {
+  background: alpha(var(--mood-bg), 0.97);
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* search row */
+window.finder .searchrow { padding: 0 12px 0 8px; min-height: 58px; }
+window.finder .search {
+  background: transparent; border: none; box-shadow: none; outline: none;
+  color: var(--ink); font-size: 17px; min-height: 58px; padding: 0 8px; caret-color: var(--mood-light);
+}
+window.finder .search image { color: var(--ink-3); -gtk-icon-size: 17px; }
+window.finder .search text placeholder { color: var(--ink-3); }
+window.finder .search text selection { background: alpha(var(--mood-accent), 0.5); color: var(--ink); }
+window.finder .segmented { background: rgba(255, 255, 255, 0.05); border-radius: 9px; padding: 2px; }
+window.finder .segmented button {
+  min-height: 24px; padding: 0 11px; border-radius: 7px; border: none; box-shadow: none; outline: none;
+  background: transparent; color: var(--ink-3); font-size: 11.5px; font-weight: 600;
+}
+window.finder .segmented button:hover { color: var(--ink-2); }
+window.finder .segmented button:checked { background: rgba(255, 255, 255, 0.10); color: var(--ink); }
+window.finder .divider { min-height: 1px; background: var(--line); }
+
+/* results */
+window.finder .section { color: var(--ink-3); font-size: 11px; font-weight: 600; padding: 12px 20px 5px 20px; }
+window.finder list { background: transparent; }
+window.finder list row {
+  background: transparent; border: none; outline: none; box-shadow: none;
+  border-radius: 10px; margin: 0 8px; padding: 6px 10px; min-height: 42px;
+}
+window.finder list row:hover { background: rgba(255, 255, 255, 0.035); }
+window.finder list row:selected { background: alpha(var(--mood-accent), 0.20); }
+window.finder list row:focus-visible { outline: none; }
+window.finder .name { color: var(--ink); font-size: 13.5px; font-weight: 500; }
+window.finder .dir { color: var(--ink-3); font-size: 11px; }
+window.finder .snip { color: var(--ink-2); font-size: 11px; }
+window.finder .when { color: var(--ink-3); font-size: 11px; }
+window.finder row:selected .when { opacity: 0; }
+window.finder .act {
+  color: var(--ink); font-size: 10.5px; font-weight: 600; opacity: 0;
+  background: rgba(255, 255, 255, 0.09); border-radius: 6px; padding: 2px 8px;
+}
+window.finder row:selected .act { opacity: 1; }
+window.finder .tag {
+  color: var(--mood-light); font-size: 9.5px; font-weight: 700;
+  background: alpha(var(--mood-accent), 0.14); border-radius: 5px; padding: 1px 6px;
+}
+window.finder .cmdicon { color: var(--mood-light); }
+window.finder .empty { color: var(--ink-3); font-size: 13px; padding: 40px 30px; }
+window.finder .empty-icon { color: rgba(230, 221, 211, 0.18); }
+
+/* footer: status on the left, keys on the right */
+window.finder .footer { border-top: 1px solid var(--line); padding: 0 8px 0 16px; min-height: 36px;
+  background: rgba(255, 255, 255, 0.015); border-radius: 0 0 16px 16px; }
+window.finder .status { color: var(--ink-3); font-size: 11px; }
+window.finder .status.warn { color: var(--mood-light); }
+window.finder .keytext { color: var(--ink-3); font-size: 11px; }
+window.finder .keycap {
+  color: var(--ink-2); font-size: 10px; font-weight: 600; min-width: 14px;
+  background: rgba(255, 255, 255, 0.07); border-radius: 5px; padding: 1px 6px;
+}
+window.finder .lock {
+  min-width: 26px; min-height: 26px; padding: 0; border-radius: 7px; border: none;
+  background: transparent; color: var(--ink-3); box-shadow: none; outline: none;
+}
+window.finder .lock:hover { background: rgba(255, 255, 255, 0.07); color: var(--ink-2); }
+window.finder .lock:checked { background: alpha(var(--mood-accent), 0.35); color: var(--ink); }
+
+window.finder scrolledwindow, window.finder scrolledwindow > viewport { background: transparent; }
+window.finder scrollbar { background: transparent; border: none; }
+window.finder scrollbar slider { background: rgba(255, 255, 255, 0.14); min-width: 4px; border: none; }
+window.finder scrollbar slider:hover { background: alpha(var(--mood-accent), 0.7); }
+tooltip, tooltip.background { background: alpha(var(--mood-bg), 0.97); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; }
+"""
+
+MOOD_DIR = os.path.join(GLib.get_user_config_dir(), "ubuntu_extension_marco", "mood")
+
+
+def watch_mood(display, on_change=None):
+    """Wallpaper Mood: load its colour variables on top of ours and reload them live."""
+    prov = Gtk.CssProvider()
+    path = os.path.join(MOOD_DIR, "gtk.css")
+
+    def load(*_):
+        try:
+            with open(path) as f:
+                prov.load_from_string(f.read())
+        except OSError:
+            prov.load_from_string("")
+        if on_change:
+            on_change()
+
+    load()
+    Gtk.StyleContext.add_provider_for_display(display, prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+    os.makedirs(MOOD_DIR, exist_ok=True)
+    mon = Gio.File.new_for_path(MOOD_DIR).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+    mon.connect("changed", lambda _m, f, o, _e: load() if "gtk.css" in (
+        f.get_basename(), o.get_basename() if o else None) else None)
+    return mon  # keep a reference, or the monitor stops
+
+
+
+# ---------- ranking (no GTK: also used by the speed test) ----------
+def score(path, words, phrase):
+    """Higher is better. words are lower-case query words, phrase the whole query."""
+    low = path.lower()
+    name = low.rsplit("/", 1)[-1] or low
+    stem = name.rsplit(".", 1)[0] if "." in name[1:] else name
+    s = 0.0
+    if all(w in name for w in words):
+        s += 100
+        if name == phrase or stem == phrase:
+            s += 60
+        if any(name.endswith("." + w) for w in words):
+            s += 40  # "png", "cv pdf": the type of file asked for
+        elif name.startswith(words[0]):
+            s += 35
+        elif any(name.startswith(w) or f" {w}" in name or f"-{w}" in name or f"_{w}" in name
+                 or f".{w}" in name for w in words):
+            s += 15
+    if low.startswith(HOME.lower() + "/"):
+        s += 60
+        if any(d.lower() in low for d in USER_DIRS):
+            s += 12
+        rel = low[len(HOME) + 1:]
+        if (rel.startswith(".") or "/." in rel) and not phrase.startswith("."):
+            s -= 30  # hidden config/data folders
+    elif low.startswith(DRIVE_ROOTS):
+        s += 45  # USB drives: the user's own files too
+    for n in NOISE:
+        if n.lower() in low and not any(w in n.lower() for w in words):
+            s -= 60
+            break
+    s -= low.count("/") * 2.0
+    s -= len(name) * 0.15
+    return s
+
+
+def rank(paths, query):
+    words = [w for w in query.lower().split() if w]
+    if not words:
+        return []
+    phrase = " ".join(words)
+    seen = set()
+    uniq = [p for p in paths if p and not (p in seen or seen.add(p))]
+    return sorted(uniq, key=lambda p: -score(p, words, phrase))
+
+
+def _visible_home_dirs():
+    """~/Documents, ~/Downloads, ... (not hidden folders like ~/.cache)."""
+    try:
+        return sorted(e.path for e in os.scandir(HOME)
+                      if not e.name.startswith(".") and e.is_dir(follow_symlinks=False))[:16]
+    except OSError:
+        return []
+
+
+def _db_arg(dbs):
+    return ":".join(d.replace("\\", "\\\\").replace(":", "\\:") for d in dbs)
+
+
+def plocate_cmds(query, extra_dbs=()):
+    """The searches run (at the same time) for one query. All use plocate's fast
+    substring index; a search per visible home folder keeps hidden folders like
+    ~/.cache from filling the limit before ~/Documents is reached. extra_dbs are
+    the USB drive indexes, searched together with the system one."""
+    words = query.split()
+    short = len(query.strip()) <= 2  # "x", "py": almost everything matches, fewer is plenty
+    name_n, path_n, dir_n = (NAME_LIMIT // 3, PATH_LIMIT // 3, 150) if short else (NAME_LIMIT, PATH_LIMIT, 400)
+    base = ["plocate", "-i"]
+    if extra_dbs:
+        base += ["-d", _db_arg([DB, *extra_dbs])]
+    cmds = [
+        [*base, "-b", "-l", str(name_n), "--", *words],        # name matches
+        [*base, "-l", str(path_n), "--", *words, HOME + "/"],  # anywhere in home
+        [*base, "-l", str(path_n), "--", *words],              # anywhere at all
+    ]
+    for d in _visible_home_dirs() if len(query.strip()) > 1 else []:
+        cmds.append(["plocate", "-i", "-l", str(dir_n), "--", *words, d + "/"])
+    return cmds
+
+
+# ---------- live watch (inotify) ----------
+IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x8, 0x40, 0x80, 0x100, 0x200
+IN_Q_OVERFLOW, IN_IGNORED, IN_ONLYDIR, IN_DONT_FOLLOW = 0x4000, 0x8000, 0x1000000, 0x2000000
+IN_ISDIR, IN_NONBLOCK, IN_CLOEXEC = 0x40000000, 0o4000, 0o2000000
+WATCH_MASK = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE | IN_ONLYDIR | IN_DONT_FOLLOW
+EVENT = struct.Struct("iIII")
+
+
+class LiveIndex:
+    """Files created, moved in or deleted since the last index refresh, seen live through
+    inotify on the home folder and plugged-in drives."""
+
+    def __init__(self):
+        self.added = {}    # path -> time it appeared
+        self.listeners = []  # called with (path, gone) for every change (the content index)
+        self.wd = {}       # watch descriptor -> folder
+        self.by_path = {}  # folder -> watch descriptor
+        self.fd = -1
+        self._queue = []   # folder trees still to walk
+        self._walking = False
+        try:
+            self._libc = ctypes.CDLL(None, use_errno=True)
+            self._libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+            self._libc.inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+            self.fd = self._libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+        except (OSError, AttributeError):
+            self.fd = -1
+        if self.fd >= 0:
+            ch = GLib.IOChannel.unix_new(self.fd)
+            GLib.io_add_watch(ch, GLib.PRIORITY_DEFAULT_IDLE, GLib.IOCondition.IN, self._on_events)
+
+    # walking happens in small idle steps so the window never stutters
+    def add_tree(self, root, record=False):
+        if self.fd < 0:
+            return
+        self._queue.append((root, record))
+        if not self._walking:
+            self._walking = True
+            GLib.idle_add(self._walk_step, self._walk())
+
+    def _walk(self):
+        while self._queue:
+            root, record = self._queue.pop(0)
+            for top, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in NO_WATCH and not d.startswith(".")
+                           and not os.path.islink(os.path.join(top, d))]
+                if not self._watch(top):
+                    dirs[:] = []
+                if record:
+                    now = time.time()
+                    for n in files + dirs:
+                        self.added[os.path.join(top, n)] = now
+                yield
+
+    def _walk_step(self, gen):
+        for _ in range(200):
+            if next(gen, StopIteration) is StopIteration:
+                self._walking = False
+                return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    def _watch(self, folder):
+        if folder in self.by_path:
+            return True
+        if len(self.wd) >= MAX_WATCHES:
+            return False
+        wd = self._libc.inotify_add_watch(self.fd, os.fsencode(folder), WATCH_MASK)
+        if wd < 0:
+            return False
+        self.wd[wd] = folder
+        self.by_path[folder] = wd
+        return True
+
+    def remove_tree(self, root):
+        pre = root.rstrip("/") + "/"
+        for folder in [f for f in self.by_path if f == root or f.startswith(pre)]:
+            wd = self.by_path.pop(folder)
+            self.wd.pop(wd, None)
+            if self.fd >= 0:
+                self._libc.inotify_rm_watch(self.fd, wd)
+        for p in [p for p in self.added if p.startswith(pre)]:
+            del self.added[p]
+
+    def _on_events(self, _ch, _cond):
+        try:
+            data = os.read(self.fd, 256 * 1024)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        i = 0
+        while i + EVENT.size <= len(data):
+            wd, mask, _cookie, size = EVENT.unpack_from(data, i)
+            name = data[i + EVENT.size:i + EVENT.size + size].rstrip(b"\0")
+            i += EVENT.size + size
+            if mask & IN_IGNORED:
+                folder = self.wd.pop(wd, None)
+                if folder:
+                    self.by_path.pop(folder, None)
+                continue
+            if mask & IN_Q_OVERFLOW or wd not in self.wd or not name:
+                continue
+            path = os.path.join(self.wd[wd], os.fsdecode(name))
+            for listener in self.listeners:
+                if mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM) or mask & IN_ISDIR:
+                    listener(path, bool(mask & (IN_DELETE | IN_MOVED_FROM)))
+            if mask & IN_CLOSE_WRITE:
+                continue
+            if mask & (IN_CREATE | IN_MOVED_TO):
+                self.added[path] = time.time()
+                base = os.path.basename(path)
+                if mask & IN_ISDIR and base not in NO_WATCH and not base.startswith("."):
+                    self.add_tree(path, record=True)  # catch files made before the watch started
+            elif mask & (IN_DELETE | IN_MOVED_FROM):
+                self.added.pop(path, None)
+                if mask & IN_ISDIR:
+                    self.remove_tree(path)
+        return True
+
+    def match(self, words):
+        return [p for p in self.added if all(w in p.lower() for w in words)]
+
+    def prune(self, index_time):
+        """Forget what an index refresh has picked up since. index_time(path) -> mtime."""
+        for p, t in list(self.added.items()):
+            if t < index_time(p) - 5:
+                del self.added[p]
+
+
+# ---------- USB drives ----------
+class Drives:
+    """One plocate index per plugged-in drive, kept in ~/.cache/file-finder/drives/."""
+
+    def __init__(self, live, on_change):
+        self.live = live
+        self.on_change = on_change
+        self.mounted = {}  # mount folder -> its index file
+        self.monitor = Gio.VolumeMonitor.get()
+        self.monitor.connect("mount-added", lambda _m, mount: self._added(mount))
+        self.monitor.connect("mount-removed", lambda _m, mount: self._removed(mount))
+        for mount in self.monitor.get_mounts():
+            self._added(mount)
+        GLib.timeout_add_seconds(DRIVE_REFRESH_S, self._refresh_all)
+
+    @staticmethod
+    def _root(mount):
+        root = mount.get_root().get_path()
+        return root if root and root.startswith(DRIVE_ROOTS) else None
+
+    def _added(self, mount):
+        root = self._root(mount)
+        if not root or root in self.mounted:
+            return
+        vol = mount.get_volume()
+        key = mount.get_uuid() or (vol.get_uuid() if vol else None) or root.strip("/").replace("/", "_")
+        self.mounted[root] = os.path.join(DRIVE_DBS, key + ".db")
+        self.live.add_tree(root)
+        self._index(root)
+
+    def _removed(self, mount):
+        root = self._root(mount)
+        if root and self.mounted.pop(root, None):
+            self.live.remove_tree(root)
+            self.on_change()
+
+    def _index(self, root):
+        db = self.mounted.get(root)
+        if not db:
+            return
+        os.makedirs(DRIVE_DBS, exist_ok=True)
+        argv = ["nice", "-n", "19", "ionice", "-c", "3", "updatedb", "-l", "no", "-U", root,
+                "-o", db, "--prunepaths", "", "--prunefs", "", "--prunenames", ""]
+        try:
+            proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error:
+            return
+        proc.wait_async(None, lambda *_: self.on_change())
+
+    def _refresh_all(self):
+        for root in list(self.mounted):
+            self._index(root)
+        return GLib.SOURCE_CONTINUE
+
+    def dbs(self):
+        return [db for db in self.mounted.values() if os.path.exists(db)]
+
+    def index_time(self, path):
+        """mtime of the index that covers path (0 = none yet)."""
+        for root, db in self.mounted.items():
+            if path.startswith(root.rstrip("/") + "/"):
+                try:
+                    return os.stat(db).st_mtime
+                except OSError:
+                    return 0
+        try:
+            return os.stat(DB).st_mtime
+        except OSError:
+            return 0
+
+
+# ---------- protected files (root helper) ----------
+class RootHelper:
+    """Runs /usr/local/sbin/file-finder-root through pkexec (one password popup) and
+    sends it searches over a pipe, one JSON line each way."""
+
+    def __init__(self, on_state):
+        self.on_state = on_state  # called with "starting", "ready" or "off"
+        self.proc = None
+        self.ready = False
+        self._next = 0
+        self._waiting = {}
+
+    def start(self):
+        if self.proc:
+            return
+        if not os.path.exists(ROOT_HELPER):
+            self.on_state("missing")
+            return
+        try:
+            self.proc = Gio.Subprocess.new(["pkexec", ROOT_HELPER],
+                                           Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
+                                           | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error:
+            self.on_state("off")
+            return
+        self._out = Gio.DataInputStream.new(self.proc.get_stdout_pipe())
+        self._in = self.proc.get_stdin_pipe()
+        self.proc.wait_async(None, self._on_exit, self.proc)
+        self._read()
+        self.on_state("starting")
+
+    def stop(self):
+        if self.proc:
+            try:
+                self._in.close(None)  # the helper quits when its input closes
+            except GLib.Error:
+                self.proc.force_exit()
+
+    def _on_exit(self, _p, _res, proc):
+        if proc is not self.proc:
+            return
+        self.proc, self.ready = None, False
+        for cb in self._waiting.values():
+            cb([])
+        self._waiting.clear()
+        self.on_state("off")
+
+    def _read(self):
+        if self.proc:
+            self._out.read_line_async(GLib.PRIORITY_DEFAULT, None, self._on_line, self.proc)
+
+    def _on_line(self, stream, res, proc):
+        try:
+            line, _len = stream.read_line_finish_utf8(res)
+        except GLib.Error:
+            return
+        if line is None or proc is not self.proc:
+            return
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            msg = {}
+        if msg.get("ready") and not self.ready:
+            self.ready = True
+            self.on_state("ready")
+        cb = self._waiting.pop(msg.get("id"), None)
+        if cb:
+            cb(msg.get("paths") or [])
+        self._read()
+
+    def query(self, words, limit, basename, cb):
+        if not (self.proc and self.ready):
+            cb([])
+            return
+        self._next += 1
+        self._waiting[self._next] = cb
+        req = json.dumps({"id": self._next, "words": words, "limit": limit, "basename": basename}) + "\n"
+        try:
+            self._in.write_all(req.encode(), None)
+        except GLib.Error:
+            self._waiting.pop(self._next, None)
+            cb([])
+
+
+def _value(gtype, obj):
+    v = GObject.Value()
+    v.init(gtype)
+    v.set_boxed(obj)
+    return v
+
+
+def _short(path):
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + "/") else path
+
+
+def _when(ts):
+    if not ts:
+        return ""
+    t, now = time.localtime(ts), time.localtime()
+    if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday:
+        return time.strftime("%H:%M", t)
+    if t.tm_year == now.tm_year:
+        return time.strftime("%b %-d", t)
+    return time.strftime("%b %Y", t)
+
+
+def _ago(ts):
+    m = int((time.time() - ts) // 60)
+    if m < 1:
+        return "just now"
+    if m < 60:
+        return f"{m} min ago"
+    if m < 48 * 60:
+        return f"{m // 60} h ago"
+    return f"{m // 1440} days ago"
+
+
+MARK = "#d0606a"  # matched letters; follows Wallpaper Mood's light accent
+
+
+def _mood_changed():
+    global MARK
+    try:
+        with open(os.path.join(MOOD_DIR, "mood.json")) as f:
+            MARK = json.load(f).get("light") or MARK
+    except (OSError, ValueError):
+        pass
+
+
+def _markup(name, words):
+    """File name with the matched parts in crimson bold."""
+    low = name.lower()
+    hit = [False] * len(name)
+    for w in words:
+        i = low.find(w)
+        while w and i != -1:
+            for k in range(i, i + len(w)):
+                hit[k] = True
+            i = low.find(w, i + len(w))
+    out, i = [], 0
+    while i < len(name):
+        j = i
+        while j < len(name) and hit[j] == hit[i]:
+            j += 1
+        part = GLib.markup_escape_text(name[i:j])
+        out.append(f'<span foreground="{MARK}" weight="bold">{part}</span>' if hit[i] else part)
+        i = j
+    return "".join(out)
+
+
+def _gfile(path, protected):
+    """Protected files open through admin:// (Files and most apps ask for the password)."""
+    if protected:
+        return Gio.File.new_for_uri("admin://" + urllib.parse.quote(path))
+    return Gio.File.new_for_path(path)
+
+
+# ---------- contents: full-text index of Documents and Downloads ----------
+CONTENT_DB = os.path.join(GLib.get_user_cache_dir(), "file-finder", "content.db")
+CONTENT_ROOTS = [os.path.join(HOME, "Documents"), os.path.join(HOME, "Downloads")]
+CONTENT_SKIP = NO_WATCH | {".next", "dist", "build", "target", ".idea", ".gradle", "coverage"}
+MAX_TEXT_BYTES = 2_000_000   # bigger plain-text files are logs/data dumps
+MAX_BODY = 400_000           # characters kept per file
+OFFICE = {".docx": ("word/document.xml",), ".pptx": ("ppt/slides/slide",), ".xlsx": ("xl/sharedStrings.xml",),
+          ".odt": ("content.xml",), ".ods": ("content.xml",), ".odp": ("content.xml",)}
+NOT_TEXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tif", ".tiff", ".heic",
+            ".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".zip",
+            ".tar", ".gz", ".xz", ".bz2", ".7z", ".rar", ".deb", ".rpm", ".apk", ".iso", ".exe", ".dll",
+            ".so", ".o", ".a", ".class", ".jar", ".pyc", ".mo", ".bin", ".db", ".sqlite", ".woff",
+            ".woff2", ".ttf", ".otf", ".psd", ".blend", ".map", ".lock", ".dmg", ".img", ".pkl", ".pt",
+            ".npy", ".npz", ".h5", ".onnx", ".doc", ".ppt", ".xls"}
+
+
+def extract_text(path, size):
+    """Searchable text of a file, or None if it has none."""
+    low = path.lower()
+    ext = os.path.splitext(low)[1]
+    if ext in NOT_TEXT or low.endswith((".min.js", ".min.css")):
+        return None
+    try:
+        if ext == ".pdf":
+            out = subprocess.run(["nice", "-n", "19", "pdftotext", "-q", "-l", "80", "-enc", "UTF-8", path, "-"],
+                                 capture_output=True, timeout=40).stdout
+            return out.decode("utf-8", "replace")[:MAX_BODY]
+        if ext in OFFICE:
+            parts = []
+            with zipfile.ZipFile(path) as z:
+                for n in sorted(z.namelist()):
+                    if any(n == p or (n.startswith(p) and n.endswith(".xml")) for p in OFFICE[ext]):
+                        xml = z.read(n).decode("utf-8", "replace")
+                        parts.append(html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"</(w:p|a:p|text:p)>", "\n", xml))))
+            return re.sub(r"[ \t]+", " ", "\n".join(parts))[:MAX_BODY]
+        if size > MAX_TEXT_BYTES:
+            return None
+        with open(path, "rb") as f:
+            data = f.read()
+        if b"\0" in data[:8192]:
+            return None  # binary
+        text = data.decode("utf-8", "replace")
+        if ext == ".ipynb":
+            try:
+                text = "\n".join("".join(c.get("source", "")) for c in json.loads(text).get("cells", []))
+            except (ValueError, AttributeError):
+                pass
+        return text[:MAX_BODY]
+    except (OSError, subprocess.SubprocessError, zipfile.BadZipFile, KeyError, RuntimeError):
+        return None
+
+
+class ContentIndex:
+    """SQLite full-text index of the files in Documents and Downloads. A background thread
+    (at the lowest priority) indexes them; the live watch tells it what changed."""
+
+    def __init__(self, on_progress):
+        self.on_progress = on_progress
+        self.q = queue.Queue()
+        self.busy = 0
+        os.makedirs(os.path.dirname(CONTENT_DB), exist_ok=True)
+        self.db = self._connect()
+        threading.Thread(target=self._worker, name="content-index", daemon=True).start()
+        self.q.put(("scan", None))
+
+    @staticmethod
+    def _connect():
+        conn = sqlite3.connect(CONTENT_DB, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, mtime REAL, size INTEGER, rid INTEGER)")
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(name, body, "
+                     "tokenize='unicode61 remove_diacritics 2')")
+        return conn
+
+    @staticmethod
+    def covers(path):
+        return any(path == r or path.startswith(r + "/") for r in CONTENT_ROOTS)
+
+    def changed(self, path, gone):
+        if self.covers(path) and "/." not in path[len(HOME):]:
+            self.q.put(("del" if gone else "add", path))
+
+    def count(self):
+        try:
+            return self.db.execute("SELECT count(*) FROM files WHERE rid IS NOT NULL").fetchone()[0]
+        except sqlite3.Error:
+            return 0
+
+    def search(self, query, limit=SHOW):
+        words = re.findall(r"\w+", query.lower())
+        if not words:
+            return []
+        # the exact phrase first ("def main"), then files that have all the words anywhere
+        tries = (['"%s"*' % " ".join(words)] if len(words) > 1 else []) + [" AND ".join('"%s"*' % w for w in words)]
+        out, seen = [], set()
+        for match in tries:
+            try:
+                rows = self.db.execute(
+                    "SELECT f.path, snippet(docs, 1, char(2), char(3), ' … ', 16) FROM docs "
+                    "JOIN files f ON f.rid = docs.rowid WHERE docs MATCH ? "
+                    "ORDER BY bm25(docs, 6.0, 1.0) LIMIT ?", (match, limit)).fetchall()
+            except sqlite3.Error:
+                continue
+            for p, snip in rows:
+                if p not in seen and os.path.exists(p):
+                    seen.add(p)
+                    out.append((p, snip))
+            if len(out) >= limit:
+                break
+        return out[:limit]
+
+    # ----- background thread -----
+    def _worker(self):
+        try:
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+        except (OSError, AttributeError):
+            pass
+        conn = self._connect()
+        n = 0
+        while True:
+            op, path = self.q.get()
+            self.busy = self.q.qsize() + 1
+            try:
+                if op == "scan":
+                    self._scan(conn)
+                elif op == "del":
+                    self._delete(conn, path)
+                elif os.path.isdir(path):
+                    for p in self._walk(path):
+                        self._index(conn, p)
+                else:
+                    self._index(conn, path)
+            except Exception as e:  # one bad file must never stop the indexer
+                print(f"file-finder: content index: {e}", file=sys.stderr)
+            n += 1
+            if self.q.empty() or n % 40 == 0:
+                conn.commit()
+                self.busy = self.q.qsize()
+                GLib.idle_add(self.on_progress)
+
+    def _walk(self, top):
+        for root, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if d not in CONTENT_SKIP and not d.startswith(".")]
+            for f in files:
+                if not f.startswith("."):
+                    yield os.path.join(root, f)
+
+    def _scan(self, conn):
+        known = {p: (m, s) for p, m, s in conn.execute("SELECT path, mtime, size FROM files")}
+        seen = set()
+        for root in CONTENT_ROOTS:
+            for p in self._walk(root):
+                seen.add(p)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if known.get(p) != (st.st_mtime, st.st_size):
+                    self.q.put(("add", p))
+        for p in set(known) - seen:
+            self.q.put(("del", p))
+
+    def _delete(self, conn, path):
+        rows = conn.execute("SELECT path, rid FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+                            (path, path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%")).fetchall()
+        for p, rid in rows:
+            if rid is not None:
+                conn.execute("DELETE FROM docs WHERE rowid = ?", (rid,))
+            conn.execute("DELETE FROM files WHERE path = ?", (p,))
+
+    def _index(self, conn, path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            self._delete(conn, path)
+            return
+        if not os.path.isfile(path):
+            return
+        row = conn.execute("SELECT mtime, size, rid FROM files WHERE path = ?", (path,)).fetchone()
+        if row and (row[0], row[1]) == (st.st_mtime, st.st_size):
+            return
+        text = extract_text(path, st.st_size)
+        rid = row[2] if row else None
+        if text is None or not text.strip():
+            if rid is not None:
+                conn.execute("DELETE FROM docs WHERE rowid = ?", (rid,))
+            rid = None  # remembered as "nothing to index" so it isn't read again
+        elif rid is not None:
+            conn.execute("UPDATE docs SET name = ?, body = ? WHERE rowid = ?", (os.path.basename(path), text, rid))
+        else:
+            rid = conn.execute("INSERT INTO docs(name, body) VALUES (?, ?)", (os.path.basename(path), text)).lastrowid
+        conn.execute("INSERT OR REPLACE INTO files(path, mtime, size, rid) VALUES (?, ?, ?, ?)",
+                     (path, st.st_mtime, st.st_size, rid))
+
+
+def snippet_markup(s):
+    s = " ".join(s.split())
+    parts = re.split("(\x02|\x03)", s)
+    out, on = [], False
+    for part in parts:
+        if part == "\x02":
+            on = True
+        elif part == "\x03":
+            on = False
+        elif part:
+            esc = GLib.markup_escape_text(part)
+            out.append(f'<span foreground="{MARK}" weight="bold">{esc}</span>' if on else esc)
+    return "".join(out)
+
+
+# ---------- apps ----------
+class Apps:
+    def __init__(self):
+        self.apps = []
+        self._mon = Gio.AppInfoMonitor.get()
+        self._mon.connect("changed", lambda *_: self._load())
+        self._load()
+
+    def _load(self):
+        self.apps = []
+        for a in Gio.AppInfo.get_all():
+            if not a.should_show():
+                continue
+            kw = a.get_keywords() if hasattr(a, "get_keywords") else []
+            gen = a.get_generic_name() if hasattr(a, "get_generic_name") else ""
+            hay = " ".join([a.get_display_name() or "", gen or "", " ".join(kw or []),
+                            os.path.basename(a.get_executable() or "")]).lower()
+            self.apps.append((a, hay, (a.get_display_name() or "").lower()))
+
+    def match(self, words, limit=4):
+        hits = []
+        for a, hay, name in self.apps:
+            if all(w in hay for w in words):
+                s = (3 if name.startswith(words[0]) else 2 if all(w in name for w in words) else 1)
+                hits.append((-s, len(name), a))
+        hits.sort(key=lambda h: h[:2])
+        return [a for _s, _n, a in hits[:limit]]
+
+
+# ---------- commands (type ">") ----------
+PROTECTED_PROCS = {"gnome-shell", "gnome-session-binary", "gnome-session", "systemd", "dbus-daemon",
+                   "dbus-broker", "pipewire", "pipewire-pulse", "wireplumber", "Xwayland", "gvfsd",
+                   "xdg-desktop-portal", "xdg-document-portal", "xdg-permission-store", "at-spi-bus-launcher",
+                   "at-spi2-registryd", "gnome-keyring-daemon", "ibus-daemon", "mutter-x11-frames",
+                   "bash", "sh", "fish", "zsh", "sshd", "login", "sudo", "polkitd"}
+CALC_OK = re.compile(r"^[\d\s.+\-*/%()^,a-z]*$", re.I)
+CALC_NAMES = {k: getattr(math, k) for k in ("sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "log10",
+                                             "log2", "exp", "floor", "ceil", "pi", "e", "tau", "factorial")}
+CALC_NAMES["factorial"] = lambda x: math.factorial(int(x)) if 0 <= x <= 170 else math.inf
+CALC_NAMES.update(log=math.log, ln=math.log, abs=abs, round=round, min=min, max=max)
+
+
+def calc(expr):
+    """Safe calculator: numbers, + - * / // % ** ^ ( ) and a few math functions."""
+    expr = expr.strip().replace("^", "**").replace("×", "*").replace("÷", "/")
+    if not expr or not CALC_OK.match(expr):
+        return None
+    try:
+        tree = ast.parse(expr.replace(",", ""), mode="eval")
+    except SyntaxError:
+        return None
+    ops = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+           ast.Div: lambda a, b: a / b, ast.FloorDiv: lambda a, b: a // b, ast.Mod: lambda a, b: a % b,
+           ast.Pow: lambda a, b: a ** b if abs(b) <= 1000 else math.inf}
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return n.value
+        if isinstance(n, ast.BinOp) and type(n.op) in ops:
+            return ops[type(n.op)](ev(n.left), ev(n.right))
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd)):
+            return -ev(n.operand) if isinstance(n.op, ast.USub) else ev(n.operand)
+        if isinstance(n, ast.Name) and n.id in CALC_NAMES and not callable(CALC_NAMES[n.id]):
+            return CALC_NAMES[n.id]
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and callable(CALC_NAMES.get(n.func.id)):
+            return CALC_NAMES[n.func.id](*[ev(a) for a in n.args])
+        raise ValueError("not allowed")
+
+    try:
+        v = ev(tree)
+    except (ValueError, ArithmeticError, TypeError, OverflowError):
+        return None
+    if isinstance(v, float):
+        if v != v or v in (math.inf, -math.inf):
+            return None
+        if v.is_integer() and abs(v) < 1e15:
+            v = int(v)
+        else:
+            return f"{v:.10g}"
+    return f"{v:,}".replace(",", " ") if isinstance(v, int) and abs(v) >= 10000 else str(v)
+
+
+def parse_duration(text):
+    """'25' -> 25 min, '90s', '1h', '1h30', '2:30' (min:sec). Returns (seconds, label) or None."""
+    m2 = re.match(r"^\s*(\d+):(\d{1,2})\s*(.*)$", text)
+    if m2:
+        secs = int(m2.group(1)) * 60 + int(m2.group(2))
+        return (secs, m2.group(3).strip()) if 0 < secs <= 24 * 3600 else None
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*(h|hr|hours?|m|min|mins|minutes?|s|sec|secs|seconds?)?"
+                 r"(?:\s*(\d+)\s*(m|min|s)?)?\s*(.*)$", text, re.I)
+    if not m:
+        return None
+    n, unit, n2, unit2, label = m.groups()
+    n = float(n)
+    unit = (unit or "m")[0].lower()
+    secs = n * {"h": 3600, "m": 60, "s": 1}[unit]
+    if n2:
+        secs += int(n2) * (1 if (unit2 or "").startswith("s") or unit == "m" else 60)
+    return (int(secs), label.strip()) if 0 < secs <= 24 * 3600 else None
+
+
+def _fmt_secs(s):
+    s = max(0, int(s))
+    h, r = divmod(s, 3600)
+    m, sec = divmod(r, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _run(*argv):
+    try:
+        Gio.Subprocess.new(list(argv), Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+        return True
+    except GLib.Error:
+        return False
+
+
+def _notify(title, body="", icon="alarm-symbolic"):
+    tool = os.path.join(HOME, ".local", "bin", "notify")
+    if os.access(tool, os.X_OK):
+        _run(tool, "-i", icon, title, body)
+    else:
+        _run("notify-send", "-i", icon, title, body)
+
+
+def user_processes(name):
+    """{process name: [pids]} for this user's processes whose name contains name."""
+    me, mine = os.getuid(), os.getpid()
+    groups = {}
+    name = name.lower()
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == mine:
+            continue
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != me:
+                continue
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip()
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                exe = os.path.basename(f.read().split(b"\0", 1)[0].decode("utf-8", "replace"))
+        except OSError:
+            continue
+        key = exe if exe and name in exe.lower() else comm
+        if name in key.lower() and key not in PROTECTED_PROCS and comm not in PROTECTED_PROCS:
+            groups.setdefault(key, []).append(int(pid))
+    return groups
+
+
+COMMANDS = [  # name, usage, what it does, icon
+    ("wifi", "wifi on | off", "Turn Wi-Fi on or off", "network-wireless-symbolic"),
+    ("bluetooth", "bluetooth on | off", "Turn Bluetooth on or off", "bluetooth-active-symbolic"),
+    ("vpn", "vpn college | proton | off | next", "Switch VPN", "network-vpn-symbolic"),
+    ("kill", "kill <app>", "Quit an app and all its windows", "process-stop-symbolic"),
+    ("timer", "timer 25   (25m, 90s, 1h30, 25 tea)", "Start a timer; > timer shows running ones",
+     "alarm-symbolic"),
+    ("calc", "calc 18*42   (or just type the sum)", "Calculate; Enter copies the answer",
+     "accessories-calculator-symbolic"),
+    ("volume", "volume 40 | mute | unmute", "Set the speaker volume", "audio-volume-high-symbolic"),
+    ("dark", "dark | light", "Switch dark or light style", "weather-clear-night-symbolic"),
+    ("lock", "lock", "Lock the screen", "system-lock-screen-symbolic"),
+    ("suspend", "suspend", "Put the computer to sleep", "weather-clear-night-symbolic"),
+]
+
+
+class Finder(Gtk.ApplicationWindow):
+    """One box: files (default), apps, "> commands", and Tab for searching inside files."""
+
+    PLACEHOLDER = {"files": "Search files, apps and commands",
+                   "contents": "Search inside documents, PDFs and code"}
+
+    def __init__(self, app):
+        super().__init__(application=app, title="File Finder")
+        self.set_decorated(False)
+        self.set_default_size(1200, 800)
+        self.maximize()
+        self.add_css_class("finder")
+        self.set_hide_on_close(True)
+
+        self._gen = 0
+        self._procs = []
+        self._dragging = False
+        self._auth = False  # password popup open: don't hide when focus goes to it
+        self._was_active = False
+        self._protected = set()  # results only the root helper could see
+        self.mode = "files"
+        self.timers = []
+
+        self.live = LiveIndex()
+        self.drives = Drives(self.live, self._index_changed)
+        self.root = RootHelper(self._root_state)
+        self.apps = Apps()
+        self.contents = ContentIndex(self._content_progress)
+        self.live.listeners.append(self.contents.changed)
+        self.live.add_tree(HOME)
+
+        # full-screen see-through backdrop with the panel floating a bit above the middle
+        backdrop = Gtk.Box()
+        backdrop.add_css_class("backdrop")
+        self.set_child(backdrop)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER,
+                        valign=Gtk.Align.CENTER, hexpand=True, vexpand=True, width_request=720)
+        panel.set_margin_bottom(120)
+        panel.add_css_class("panel")
+        backdrop.append(panel)
+        self.panel = panel
+        click = Gtk.GestureClick(button=0)
+        click.connect("pressed", self._on_backdrop_click)
+        backdrop.add_controller(click)
+
+        top = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+        top.add_css_class("searchrow")
+        self.entry = Gtk.SearchEntry(placeholder_text="Search files, apps and commands", hexpand=True)
+        self.entry.add_css_class("search")
+        self.entry.set_search_delay(60)
+        self.entry.connect("search-changed", lambda *_: self.search())
+        seg = Gtk.Box(valign=Gtk.Align.CENTER)
+        seg.add_css_class("segmented")
+        self.seg_files = Gtk.ToggleButton(label="Files", focus_on_click=False, active=True,
+                                          tooltip_text="File names, apps and commands")
+        self.seg_contents = Gtk.ToggleButton(label="Contents", focus_on_click=False, group=self.seg_files,
+                                             tooltip_text="Inside PDFs, documents and code (Tab)")
+        self.seg_files.connect("toggled", lambda b: b.get_active() and self.mode != "files" and self.set_mode("files"))
+        self.seg_contents.connect("toggled",
+                                  lambda b: b.get_active() and self.mode != "contents" and self.set_mode("contents"))
+        seg.append(self.seg_files)
+        seg.append(self.seg_contents)
+        top.append(self.entry)
+        top.append(seg)
+        panel.append(top)
+        div = Gtk.Box()
+        div.add_css_class("divider")
+        panel.append(div)
+
+        self.section = Gtk.Label(xalign=0)
+        self.section.add_css_class("section")
+        panel.append(self.section)
+
+        self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, activate_on_single_click=False)
+        self.list.connect("row-activated", lambda _l, row: self.activate(row.item))
+        self.empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, valign=Gtk.Align.CENTER, vexpand=True)
+        self.empty_icon = Gtk.Image(icon_name="system-search-symbolic", pixel_size=40)
+        self.empty_icon.add_css_class("empty-icon")
+        self.hint = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.hint.add_css_class("empty")
+        self.empty.append(self.empty_icon)
+        self.empty.append(self.hint)
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=90)
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        scroll.set_child(self.list)
+        self.scroll = scroll
+        self.stack.add_named(scroll, "list")
+        self.stack.add_named(self.empty, "empty")
+        self.stack.set_size_request(-1, 380)
+        panel.append(self.stack)
+
+        footer = Gtk.Box(spacing=14)
+        footer.add_css_class("footer")
+        self.foot = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+        self.foot.add_css_class("status")
+        self.keys = Gtk.Box(spacing=12, valign=Gtk.Align.CENTER)
+        self.lock = Gtk.ToggleButton(icon_name="changes-prevent-symbolic", focus_on_click=False,
+                                     valign=Gtk.Align.CENTER,
+                                     tooltip_text="Also search protected files: other users, /root, "
+                                                  "system data (asks for your password)   Ctrl+Shift+A")
+        self.lock.add_css_class("lock")
+        self._lock_handler = self.lock.connect("toggled", lambda b: self.set_protected(b.get_active()))
+        footer.append(self.foot)
+        footer.append(self.keys)
+        footer.append(self.lock)
+        panel.append(footer)
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+        self.connect("notify::is-active", self._on_active)
+        self.connect("hide", lambda *_: GLib.timeout_add_seconds(2, self._trim))
+
+        self.reset()
+
+    def _trim(self):
+        """Hidden: drop the result rows and hand freed memory back to the system."""
+        if not self.get_visible():
+            self.list.remove_all()
+            try:
+                ctypes.CDLL(None).malloc_trim(0)
+            except (OSError, AttributeError):
+                pass
+        return GLib.SOURCE_REMOVE
+
+    # ---------- show / hide ----------
+    def reset(self):
+        self._gen += 1
+        self._stop_procs()
+        self.set_mode("files", search=False)
+        self.entry.set_text("")
+        self.search()
+
+    def toggle(self):
+        if self.get_visible() and self.is_active():
+            self.set_visible(False)
+            return
+        self.reset()
+        self.set_opacity(1)
+        self.present()
+        self.entry.grab_focus()
+
+    def _on_active(self, *_):
+        active = self.is_active()
+        if self._was_active and not active and self.get_visible() and not (self._dragging or self._auth):
+            self.set_visible(False)
+        self._was_active = active
+
+    def set_mode(self, mode, search=True):
+        self.mode = mode
+        self.entry.set_placeholder_text(self.PLACEHOLDER[mode])
+        (self.seg_contents if mode == "contents" else self.seg_files).set_active(True)
+        if search:
+            self.search()
+
+    # ---------- protected mode ----------
+    def set_protected(self, on):
+        if on:
+            self._auth = True
+            self.root.start()
+        else:
+            self.root.stop()
+
+    def _root_state(self, state):
+        self.lock.handler_block(self._lock_handler)
+        self.lock.set_active(state in ("starting", "ready"))
+        self.lock.handler_unblock(self._lock_handler)
+        self.lock.set_icon_name("changes-allow-symbolic" if state == "ready" else "changes-prevent-symbolic")
+        if state == "ready":
+            self._auth = False
+            self.present()
+            self.entry.grab_focus()
+            self.search()
+        elif state in ("off", "missing"):
+            was_auth = self._auth
+            self._auth = False
+            self._protected.clear()
+            self.say("Protected search needs the system part of the installer" if state == "missing"
+                     else "Protected files: password not given" if was_auth else "Protected files: off", warn=True)
+            if self.get_visible() and self.entry.get_text().strip():
+                GLib.timeout_add(1200, lambda: self.search() and False)
+
+    # ---------- search ----------
+    def _stop_procs(self):
+        for p in self._procs:
+            p.force_exit()
+        self._procs = []
+
+    def _index_changed(self):
+        self.live.prune(self.drives.index_time)
+        if self.get_visible() and self.mode == "files" and not self.entry.get_text().startswith(">"):
+            self.search()
+
+    def _content_progress(self):
+        if self.get_visible() and self.mode == "contents" and not self.entry.get_text().strip():
+            self.search()
+        return GLib.SOURCE_REMOVE
+
+    def _on_backdrop_click(self, gesture, _n, x, y):
+        """A click anywhere outside the panel closes the finder."""
+        target = self.get_child().pick(x, y, Gtk.PickFlags.DEFAULT)
+        if target is None or not (target is self.panel or target.is_ancestor(self.panel)):
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            self.set_visible(False)
+
+    def set_keys(self, pairs):
+        """Footer hints: [(key, what it does), ...]."""
+        while (c := self.keys.get_first_child()):
+            self.keys.remove(c)
+        for key, text in pairs:
+            box = Gtk.Box(spacing=5)
+            cap = Gtk.Label(label=key)
+            cap.add_css_class("keycap")
+            lbl = Gtk.Label(label=text)
+            lbl.add_css_class("keytext")
+            box.append(cap)
+            box.append(lbl)
+            self.keys.append(box)
+
+    def show_empty(self, text, icon="system-search-symbolic"):
+        self.hint.set_label(text)
+        self.empty_icon.set_from_icon_name(icon)
+        self.stack.set_visible_child_name("empty")
+
+    def say(self, text, warn=False):
+        (self.foot.add_css_class if warn else self.foot.remove_css_class)("warn")
+        self.foot.set_label(text)
+
+    def search(self):
+        text = self.entry.get_text()
+        query = text.strip()
+        self._gen += 1
+        self._stop_procs()
+        if query.startswith(">"):
+            self.search_commands(query[1:].strip())
+        elif self.mode == "contents":
+            self.search_contents(query)
+        elif not query:
+            self.show_recent()
+        else:
+            self.search_files(query, self._gen)
+
+    def search_contents(self, query):
+        n, busy = self.contents.count(), self.contents.busy
+        status = f"{n:,} files indexed" + (f"  ·  indexing, {busy} to go" if busy else "")
+        self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), ("Tab", "File names")])
+        if not query:
+            self.fill([], "")
+            self.section.set_label(" ")
+            self.show_empty("Search inside PDFs, Word, Excel, PowerPoint and LibreOffice files,\n"
+                            "notes and code in Documents and Downloads", "edit-find-symbolic")
+            self.say(status)
+            return
+        started = time.monotonic()
+        hits = self.contents.search(query)
+        items = [{"kind": "hit", "path": p, "snippet": s} for p, s in hits]
+        self.fill(items, query, took=time.monotonic() - started, extra=status)
+
+    def search_files(self, query, gen):
+        if not GLib.find_program_in_path("plocate"):
+            self.fill([], query)
+            self.say("plocate is not installed: run  sudo bash system/install-system.sh $USER", warn=True)
+            return
+        started = time.monotonic()
+        words = [w for w in query.lower().split() if w]
+        self.live.prune(self.drives.index_time)
+        apps = [{"kind": "app", "app": a} for a in self.apps.match(words)]
+        sum_ = calc(query) if re.search(r"\d", query) and re.search(r"[-+*/^%()]", query) else None
+        quick = ([{"kind": "cmd", "title": f"= {sum_}", "sub": f"{query}   ·   Enter copies the answer",
+                   "icon": "accessories-calculator-symbolic", "copy": sum_.replace(" ", "")}] if sum_ else [])
+        state = {"left": 1, "paths": list(self.live.match(words)), "root": []}
+
+        def finish():
+            state["left"] -= 1
+            if state["left"] or gen != self._gen:
+                return
+            user = set(state["paths"])
+            root_only = {p for p in state["root"] if p not in user}
+            ranked = rank(state["paths"] + state["root"], query)
+            shown = []
+            for p in ranked:  # leave out files deleted since the last index refresh
+                if p in root_only or os.path.lexists(p):
+                    shown.append({"kind": "file", "path": p})
+                    if len(shown) == SHOW:
+                        break
+            self._protected = root_only
+            self.fill(quick + apps + shown, query, len(ranked), time.monotonic() - started)
+
+        def done(proc, res, _data):
+            try:
+                _ok, out, _err = proc.communicate_utf8_finish(res)
+                state["paths"].extend((out or "").splitlines())
+            except GLib.Error:
+                pass
+            finish()
+
+        def root_done(paths):
+            state["root"].extend(paths)
+            finish()
+
+        for argv in plocate_cmds(query, self.drives.dbs()):
+            try:
+                p = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+            except GLib.Error:
+                continue
+            self._procs.append(p)
+            state["left"] += 1
+            p.communicate_utf8_async(None, None, done, None)
+        if self.root.ready:
+            for basename, limit in ((True, NAME_LIMIT), (False, PATH_LIMIT)):
+                state["left"] += 1
+                self.root.query(query.split(), limit, basename, root_done)
+        finish()  # the initial count of 1
+
+    def show_recent(self):
+        items = []
+        try:
+            for it in Gtk.RecentManager.get_default().get_items():
+                uri = it.get_uri()
+                if uri.startswith("file://"):
+                    path = Gio.File.new_for_uri(uri).get_path()
+                    if path and os.path.exists(path):
+                        items.append((it.get_modified().to_unix(), path))
+        except GLib.Error:
+            pass
+        items.sort(reverse=True)
+        self._protected = set()
+        self.fill([{"kind": "file", "path": p} for _t, p in items[:12]], "")
+        self.section.set_label("Recent" if items else " ")
+        if not items:
+            self.show_empty("Search every file, folder and app on this computer.\nType > for commands.")
+        self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), (">", "Commands"), ("Tab", "Contents")])
+        self.say(self._sources())
+
+    def _sources(self):
+        try:
+            age = "index " + _ago(os.stat(DB).st_mtime)
+        except OSError:
+            age = "no index yet"
+        parts = [age, "home live"]
+        n = len(self.drives.mounted)
+        if n:
+            parts.append(f"{n} drive" + ("s" if n > 1 else ""))
+        if self.root.ready:
+            parts.append("protected on")
+        return "  ·  ".join(parts)
+
+    # ---------- commands ----------
+    def search_commands(self, text):
+        items = self.command_items(text)
+        self.fill(items, "", cmd=True)
+        self.section.set_label("Commands")
+        if not items:
+            self.show_empty("No command like that.\nType > on its own to see them all.", "system-run-symbolic")
+        self.set_keys([("↵", "Run"), ("Esc", "Close")])
+        self.say("Command bar")
+
+    def command_items(self, text):
+        def cmd(title, sub, icon, run=None, fill=None, copy=None):
+            return {"kind": "cmd", "title": title, "sub": sub, "icon": icon, "run": run, "fill": fill, "copy": copy}
+
+        if not text:
+            return [cmd(d, u, i, fill=f"> {n} ") for n, u, d, i in COMMANDS]
+        sum_ = calc(text[4:] if text.lower().startswith("calc") else text)
+        if sum_ is not None and (text.lower().startswith("calc") or re.search(r"\d", text)):
+            return [cmd(f"= {sum_}", f"{text}   ·   Enter copies the answer", "accessories-calculator-symbolic",
+                        copy=sum_.replace(" ", ""))]
+        head, _, arg = text.partition(" ")
+        head, arg = head.lower(), arg.strip()
+        exact = [c for c in COMMANDS if c[0] == head]
+        if not exact:
+            return [cmd(d, u, i, fill=f"> {n} ") for n, u, d, i in COMMANDS if n.startswith(head)
+                    or (head in ("light",) and n == "dark") or (head in ("mute", "unmute") and n == "volume")] \
+                if head not in ("light", "mute", "unmute") else self.command_items(
+                    {"light": "dark light", "mute": "volume mute", "unmute": "volume unmute"}[head])
+        name, _usage, _desc, icon = exact[0]
+        bin_ = os.path.join(HOME, ".local", "bin")
+        a = arg.lower()
+        if name in ("wifi", "bluetooth"):
+            label = "Wi-Fi" if name == "wifi" else "Bluetooth"
+            on = ["nmcli", "radio", "wifi", "on"] if name == "wifi" else ["rfkill", "unblock", "bluetooth"]
+            off = ["nmcli", "radio", "wifi", "off"] if name == "wifi" else ["rfkill", "block", "bluetooth"]
+            rows = [cmd(f"Turn {label} on", " ".join(on), icon, run=lambda: _run(*on) and f"{label} on"),
+                    cmd(f"Turn {label} off", " ".join(off), icon, run=lambda: _run(*off) and f"{label} off")]
+            return [r for r in rows if not a or a in r["title"].lower().split()[-1:]] or rows
+        if name == "vpn":
+            opts = [("college", "Connect the college VPN"), ("proton", "Connect Proton VPN"),
+                    ("off", "Turn VPN off"), ("next", "Next VPN (off, college, Proton)")]
+            return [cmd(t, f"vpn {o}", icon, run=lambda o=o: _run(os.path.join(bin_, "vpn"), o) and f"VPN: {o}")
+                    for o, t in opts if not a or o.startswith(a)]
+        if name == "kill":
+            if not a:
+                return [cmd("Type the app's name", "for example  > kill chrome", icon)]
+            groups = user_processes(a)
+            return [cmd(f"Quit {k}", f"{len(p)} process{'es' if len(p) > 1 else ''}   ·   Enter ends them", icon,
+                        run=lambda p=p, k=k: self._kill(p, k))
+                    for k, p in sorted(groups.items(), key=lambda kv: -len(kv[1]))[:8]] or \
+                [cmd(f"Nothing called “{arg}” is running", "", icon)]
+        if name == "timer":
+            if a in ("", "list", "cancel", "stop"):
+                rows = [cmd(f"Cancel {t['label'] or 'timer'}  ({_fmt_secs(t['end'] - time.time())} left)",
+                            f"ends at {time.strftime('%H:%M:%S', time.localtime(t['end']))}", icon,
+                            run=lambda t=t: self._cancel_timer(t)) for t in self.timers]
+                return rows or [cmd("No timers running", "> timer 25  starts a 25 minute timer", icon)]
+            d = parse_duration(arg)
+            if not d:
+                return [cmd("Timer length?", "25 = 25 minutes   ·   90s   ·   1h30   ·   25 tea", icon)]
+            secs, label = d
+            return [cmd(f"Start a {_fmt_secs(secs)} timer" + (f" for {label}" if label else ""),
+                        f"rings at {time.strftime('%H:%M', time.localtime(time.time() + secs))}", icon,
+                        run=lambda: self._start_timer(secs, label))]
+        if name == "calc":
+            return [cmd("Type a sum", "18*42   ·   (3+4)^2   ·   sqrt(2)   ·   15% of 80 = 0.15*80", icon)]
+        if name == "volume":
+            if a in ("mute", "unmute"):
+                v = "1" if a == "mute" else "0"
+                return [cmd(a.capitalize(), "speaker", icon,
+                            run=lambda: _run("pactl", "set-sink-mute", "@DEFAULT_SINK@", v) and a.capitalize())]
+            m = re.match(r"^(\d{1,3})%?$", a)
+            if m and int(m.group(1)) <= 150:
+                n = int(m.group(1))
+                return [cmd(f"Set volume to {n}%", "speaker", icon,
+                            run=lambda: _run("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{n}%") and f"Volume {n}%")]
+            return [cmd("Volume level?", "volume 40   ·   mute   ·   unmute", icon)]
+        if name == "dark":
+            iface = "org.gnome.desktop.interface"
+            rows = [cmd("Dark style", "", "weather-clear-night-symbolic",
+                        run=lambda: _run("gsettings", "set", iface, "color-scheme", "prefer-dark") and "Dark style"),
+                    cmd("Light style", "", "weather-clear-symbolic",
+                        run=lambda: _run("gsettings", "set", iface, "color-scheme", "default") and "Light style")]
+            return [r for r in rows if not a or a in r["title"].lower()] or rows
+        if name == "lock":
+            return [cmd("Lock the screen", "", icon, run=lambda: _run("loginctl", "lock-session") and "Locked")]
+        if name == "suspend":
+            return [cmd("Sleep now", "suspend", icon, run=lambda: _run("systemctl", "suspend") and "Sleeping")]
+        return []
+
+    def _kill(self, pids, name):
+        n = 0
+        for pid in pids:
+            try:
+                os.kill(pid, 15)
+                n += 1
+            except OSError:
+                pass
+        return f"Quit {name} ({n})"
+
+    def _start_timer(self, secs, label):
+        t = {"end": time.time() + secs, "label": label, "id": 0}
+
+        def ring():
+            if t in self.timers:
+                self.timers.remove(t)
+            _notify("Time's up" + (f": {label}" if label else ""), f"{_fmt_secs(secs)} timer finished")
+            _run("canberra-gtk-play", "-i", "complete")
+            return GLib.SOURCE_REMOVE
+
+        t["id"] = GLib.timeout_add_seconds(secs, ring)
+        self.timers.append(t)
+        return f"Timer set: {_fmt_secs(secs)}" + (f" ({label})" if label else "")
+
+    def _cancel_timer(self, t):
+        if t in self.timers:
+            GLib.source_remove(t["id"])
+            self.timers.remove(t)
+        return "Timer cancelled"
+
+    # ---------- results ----------
+    def fill(self, items, query, total=None, took=None, extra=None, cmd=False):
+        self.list.remove_all()
+        words = [w for w in query.lower().split() if w]
+        for item in items:
+            self.list.append(self._row(item, words))
+        first = self.list.get_row_at_index(0)
+        if first:
+            self.list.select_row(first)
+        self.scroll.get_vadjustment().set_value(0)
+        self.stack.set_visible_child_name("list")
+        if query and not cmd:
+            self.section.set_label("Matches inside files" if self.mode == "contents" else "Results")
+            if not items:
+                self.show_empty(f"No results for “{query}”" + (
+                    "\nOnly Documents and Downloads are searched inside" if self.mode == "contents" else ""))
+            if self.mode == "files":
+                self.set_keys([("↵", "Open"), ("Ctrl ↵", "Show in Files"), ("Tab", "Contents")])
+            n = sum(1 for i in items if i["kind"] in ("file", "hit"))
+            more = f"{total:,} results" if total is not None and total > n else f"{n} result" + ("" if n == 1 else "s")
+            ms = f"  ·  {took * 1000:.0f} ms" if took is not None else ""
+            self.say(f"{more}{ms}  ·  {extra or self._sources()}")
+
+    def _icon(self, gicon, name="text-x-generic"):
+        icon = Gtk.Image.new_from_gicon(gicon) if gicon else Gtk.Image.new_from_icon_name(name)
+        icon.set_pixel_size(28)
+        return icon
+
+    def _row(self, item, words):
+        kind = item["kind"]
+        path = item.get("path")
+        protected = path in self._protected if path else False
+        mtime, tag = 0, None
+        if kind in ("file", "hit"):
+            try:
+                info = Gio.File.new_for_path(path).query_info(
+                    "standard::icon,standard::fast-content-type,time::modified", Gio.FileQueryInfoFlags.NONE, None)
+                gicon = info.get_icon()
+                mtime = info.get_attribute_uint64("time::modified")
+            except GLib.Error:  # protected: guess the icon from the name
+                ctype, _uncertain = Gio.content_type_guess(path, None)
+                gicon = Gio.content_type_get_icon(ctype) if ctype else None
+            icon = self._icon(gicon)
+            name = os.path.basename(path.rstrip("/")) or path
+            title_markup = _markup(name, words)
+            if kind == "hit":
+                sub_markup = snippet_markup(item["snippet"])
+            else:
+                sub_markup = GLib.markup_escape_text(_short(os.path.dirname(path)) or "/")
+            tooltip = _short(path)
+            tag = "PROTECTED" if protected else None
+        elif kind == "app":
+            a = item["app"]
+            icon = self._icon(a.get_icon(), "application-x-executable")
+            title_markup = _markup(a.get_display_name() or "", words)
+            desc = a.get_description() or (a.get_generic_name() if hasattr(a, "get_generic_name") else "") or ""
+            sub_markup = GLib.markup_escape_text(desc or "Application")
+            tooltip, tag = desc or None, "APP"
+        else:  # command
+            icon = self._icon(None, item.get("icon") or "system-run-symbolic")
+            icon.set_pixel_size(20)
+            icon.set_size_request(28, 28)
+            icon.add_css_class("cmdicon")
+            title_markup = GLib.markup_escape_text(item["title"])
+            sub_markup = GLib.markup_escape_text(item.get("sub") or "")
+            tooltip = None
+
+        title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        title.set_markup(title_markup)
+        title.add_css_class("name")
+        sub = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END if kind == "hit" else Pango.EllipsizeMode.START)
+        sub.set_markup(sub_markup)
+        sub.add_css_class("snip" if kind == "hit" else "dir")
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True, valign=Gtk.Align.CENTER)
+        text.append(title)
+        if sub_markup:
+            text.append(sub)
+
+        box = Gtk.Box(spacing=12)
+        box.append(icon)
+        box.append(text)
+        if tag:
+            t = Gtk.Label(label=tag)
+            t.add_css_class("tag")
+            box.append(t)
+        verb = {"file": "Open", "hit": "Open", "app": "Launch"}.get(
+            kind, "Copy" if item.get("copy") else "Use" if item.get("fill") else "Run" if item.get("run") else "")
+        right = Gtk.Overlay(valign=Gtk.Align.CENTER)
+        when = Gtk.Label(label=_when(mtime) if mtime else "", xalign=1)
+        when.add_css_class("when")
+        right.set_child(when)
+        if verb:
+            act = Gtk.Label(label=f"{verb}  ↵", halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+            act.add_css_class("act")
+            right.add_overlay(act)
+            right.set_measure_overlay(act, True)
+        box.append(right)
+        row = Gtk.ListBoxRow()
+        row.set_child(box)
+        row.item = item
+        if tooltip:
+            row.set_tooltip_text(tooltip)
+
+        if kind in ("file", "hit"):
+            src = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+            src.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(
+                _value(Gdk.FileList, Gdk.FileList.new_from_list([_gfile(path, protected)]))))
+            src.connect("drag-begin", self._on_drag_begin, icon)
+            src.connect("drag-end", self._on_drag_end)
+            row.add_controller(src)
+        return row
+
+    def _selected(self):
+        row = self.list.get_selected_row() or self.list.get_row_at_index(0)
+        return row.item if row else None
+
+    # ---------- actions ----------
+    def activate(self, item):
+        if not item:
+            return
+        kind = item["kind"]
+        if kind in ("file", "hit"):
+            self.open(item["path"])
+        elif kind == "app":
+            try:
+                item["app"].launch([], self.get_display().get_app_launch_context())
+                self.set_visible(False)
+            except GLib.Error as e:
+                self.say(f"Can't start: {e.message}", warn=True)
+        elif item.get("fill"):
+            self.entry.set_text(item["fill"])
+            self.entry.set_position(-1)
+        elif item.get("copy"):
+            self.get_display().get_clipboard().set(item["copy"])
+            self.say(f"Copied  {item['copy']}")
+            GLib.timeout_add(500, lambda: self.set_visible(False) or False)
+        elif item.get("run"):
+            msg = item["run"]()
+            if msg:
+                self.say(msg)
+                GLib.timeout_add(450, lambda: self.set_visible(False) or False)
+            else:
+                self.say("That didn't work", warn=True)
+
+    def open(self, path):
+        try:
+            ctx = self.get_display().get_app_launch_context()
+            Gio.AppInfo.launch_default_for_uri(_gfile(path, path in self._protected).get_uri(), ctx)
+            self.set_visible(False)
+        except GLib.Error as e:
+            self.say(f"Can't open: {e.message}", warn=True)
+
+    def reveal(self, item):
+        if not item or item["kind"] not in ("file", "hit"):
+            return self.activate(item)
+        path = item["path"]
+        uri = _gfile(path, path in self._protected).get_uri()
+        # through the launch context, so Files gets the activation token and comes to the front
+        ctx = self.get_display().get_app_launch_context()
+        try:
+            files = Gio.AppInfo.create_from_commandline("nautilus --select", "Files",
+                                                        Gio.AppInfoCreateFlags.SUPPORTS_URIS)
+            files.launch_uris([uri], ctx)
+        except GLib.Error:
+            token = ctx.get_startup_notify_id(None, []) or ""
+            Gio.DBus.session.call("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                                  "org.freedesktop.FileManager1", "ShowItems",
+                                  GLib.Variant("(ass)", ([uri], token)),
+                                  None, Gio.DBusCallFlags.NONE, 10000, None, None)
+        self.set_visible(False)
+
+    def copy_path(self, item):
+        if item and item.get("path"):
+            self.get_display().get_clipboard().set(item["path"])
+            self.say(f"Copied  {_short(item['path'])}")
+
+    def _move(self, step):
+        row = self.list.get_selected_row()
+        i = (row.get_index() + step) if row else 0
+        nxt = self.list.get_row_at_index(max(0, i))
+        if nxt:
+            self.list.select_row(nxt)
+            # keep the selected row in view without taking focus from the search box
+            ok, rect = nxt.compute_bounds(self.list)
+            if ok:
+                adj = self.scroll.get_vadjustment()
+                top, bottom = rect.get_y(), rect.get_y() + rect.get_height()
+                if top < adj.get_value():
+                    adj.set_value(top)
+                elif bottom > adj.get_value() + adj.get_page_size():
+                    adj.set_value(bottom - adj.get_page_size())
+
+    def _on_key(self, _c, keyval, _code, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        if keyval == Gdk.KEY_Escape:
+            self.set_visible(False)
+            return True
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_KP_Tab):
+            if not self.entry.get_text().lstrip().startswith(">"):
+                self.set_mode("files" if self.mode == "contents" else "contents")
+            return True
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+            self._move(1)
+            return True
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
+            self._move(-1)
+            return True
+        if keyval in (Gdk.KEY_Page_Down, Gdk.KEY_Page_Up):
+            self._move(8 if keyval == Gdk.KEY_Page_Down else -8)
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+            (self.reveal if ctrl else self.activate)(self._selected())
+            return True
+        if ctrl and shift and keyval in (Gdk.KEY_a, Gdk.KEY_A):
+            self.lock.set_active(not self.lock.get_active())
+            return True
+        if ctrl and keyval in (Gdk.KEY_c, Gdk.KEY_C) and not self.entry.get_selection_bounds():
+            self.copy_path(self._selected())
+            return True
+        return False
+
+    # ---------- drag out ----------
+    def _on_drag_begin(self, source, _drag, icon):
+        self._dragging = True
+        paintable = icon.get_paintable()
+        if paintable:
+            source.set_icon(paintable, 16, 16)
+        # step out of the way so the drop lands on the window underneath
+        GLib.timeout_add(120, self._fade_out)
+
+    def _fade_out(self):
+        if self._dragging:
+            self.set_opacity(0)
+            self._passthrough(True)
+        return GLib.SOURCE_REMOVE
+
+    def _passthrough(self, on):
+        surface = self.get_surface()
+        if not surface:
+            return
+        try:
+            gi.require_foreign("cairo")
+            import cairo
+            full = cairo.RectangleInt(0, 0, 10000, 10000)
+            surface.set_input_region(cairo.Region() if on else cairo.Region(full))
+        except Exception:  # pycairo missing: the window just stays see-through
+            pass
+
+    def _on_drag_end(self, *_):
+        self._dragging = False
+        self._passthrough(False)
+        self.set_visible(False)
+        self.set_opacity(1)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.win = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self._mood = watch_mood(Gdk.Display.get_default(), _mood_changed)
+        self.win = Finder(self)
+        self.hold()  # keep running while hidden
+
+    def do_command_line(self, cmdline):
+        if "--background" not in cmdline.get_arguments()[1:]:
+            self.win.toggle()
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(App().run(sys.argv))

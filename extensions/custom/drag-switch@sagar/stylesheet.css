@@ -1,0 +1,7 @@
+/* Drag Switch countdown bar: same crimson as the dock's running dots and the
+   notification badges. Wallpaper Mood overrides the colours to match the wallpaper. */
+.drag-switch-bar {
+  border-radius: 3px;
+  background-color: #b1444d;
+  box-shadow: 0 0 8px 1px rgba(177, 68, 77, 0.6);
+}

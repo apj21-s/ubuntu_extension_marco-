@@ -26,6 +26,7 @@ iw
 nftables
 gnome-session-canberra
 curl
+plocate
 
 # music pill visualizer
 cava

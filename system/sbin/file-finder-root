@@ -1,0 +1,71 @@
+#!/usr/bin/python3 -I
+"""Root search helper for the Super+F File Finder's "protected files" mode.
+
+Started by the finder with pkexec (one password popup). Reads one JSON request per line
+on stdin, {"id": n, "words": [...], "limit": n, "basename": bool}, and answers with one
+JSON line, {"id": n, "paths": [...]}. It only ever runs plocate with the given search
+words, and quits when the finder closes the pipe or after 10 minutes without a request.
+"""
+import json
+import os
+import select
+import subprocess
+
+IDLE_S = 600
+MAX_LIMIT = 5000
+MAX_WORDS = 12
+
+
+def answer(req):
+    words = req.get("words")
+    if not isinstance(words, list) or not 0 < len(words) <= MAX_WORDS:
+        return []
+    words = [str(w) for w in words]
+    if any(not w or "\0" in w for w in words):
+        return []
+    try:
+        limit = max(1, min(int(req.get("limit", 1000)), MAX_LIMIT))
+    except (TypeError, ValueError):
+        return []
+    argv = ["/usr/bin/plocate", "-i", "-l", str(limit)]
+    if req.get("basename") is True:
+        argv.append("-b")
+    argv += ["--", *words]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def send(obj):
+    os.write(1, (json.dumps(obj) + "\n").encode())
+
+
+def main():
+    send({"ready": True})
+    buf = b""
+    while True:
+        ready, _, _ = select.select([0], [], [], IDLE_S)
+        if not ready:
+            return  # idle too long
+        chunk = os.read(0, 65536)
+        if not chunk:
+            return  # the finder closed the pipe
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                req = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(req, dict):
+                send({"id": req.get("id"), "paths": answer(req)})
+        if len(buf) > 1 << 20:
+            buf = b""
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass

@@ -19,6 +19,18 @@ const BOTTOM_GAP = 110;    // ring sits this far above the bottom edge (clears t
 const CRIMSON = [0.82, 0.38, 0.42];   // #d0606a
 const CREAM = [0.96, 0.93, 0.90];
 
+// Wallpaper Mood (~/.local/bin/wallpaper-mood) recolours the ring to the wallpaper's accent.
+function accent() {
+    try {
+        const path = GLib.build_filenamev([GLib.get_user_config_dir(), 'ubuntu_extension_marco', 'mood', 'mood.json']);
+        const [ok, bytes] = GLib.file_get_contents(path);
+        const c = ok ? JSON.parse(new TextDecoder().decode(bytes)).rgb?.light : null;
+        if (Array.isArray(c) && c.length === 3)
+            return c;
+    } catch (e) {}
+    return CRIMSON;
+}
+
 function proxy(path, iface) {
     return new Promise((resolve, reject) => {
         Gio.DBusProxy.new_for_bus(Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, null,
@@ -117,6 +129,7 @@ export default class ChargingSplashExtension extends Extension {
         let progress = anim ? 0 : 1;
         const ring = new St.DrawingArea({width: size, height: size,
             x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
+        const tint = accent();
         ring.connect('repaint', area => {
             const cr = area.get_context();
             const [w, h] = area.get_surface_size();
@@ -128,7 +141,7 @@ export default class ChargingSplashExtension extends Extension {
             cr.stroke();
             const level = plugged ? pct / 100 * progress : pct / 100 * (1 - 0.12 * progress);
             if (level > 0.001) {
-                const [cr0, cg, cb] = plugged ? CRIMSON : CREAM;
+                const [cr0, cg, cb] = plugged ? tint : CREAM;
                 cr.setSourceRGBA(cr0, cg, cb, plugged ? 1 : 0.55);
                 cr.arc(w / 2, h / 2, r, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * level);
                 cr.stroke();

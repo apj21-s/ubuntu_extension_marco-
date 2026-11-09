@@ -1,0 +1,17 @@
+#!/bin/bash
+# ExecCondition for plocate-updatedb.service (the Super+F file finder's index).
+# On the charger: refresh every time the timer fires (every 15 minutes).
+# On battery: at most once an hour. The finder watches the home folder and USB drives
+# live in between, and apt refreshes the index after every install, so that is enough.
+# Exit 0 = run now, exit 1 = skip this time.
+have_battery=0
+for s in /sys/class/power_supply/*; do
+  t=$(cat "$s/type" 2>/dev/null)
+  [ "$t" = Battery ] && have_battery=1
+  [ "$t" = Mains ] && [ "$(cat "$s/online" 2>/dev/null)" = 1 ] && exit 0
+done
+[ $have_battery = 0 ] && exit 0   # desktop PC: always on mains
+db=/var/lib/plocate/plocate.db
+[ -f "$db" ] || exit 0
+[ $(( $(date +%s) - $(stat -c %Y "$db") )) -ge 3300 ] && exit 0
+exit 1

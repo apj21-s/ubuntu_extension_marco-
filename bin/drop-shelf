@@ -20,6 +20,9 @@ import time
 import uuid
 
 import gi
+# Software drawing: this window is simple, and the GPU renderer costs ~65 MB more memory
+# on this laptop and draws its first frame slower. Override with GSK_RENDERER=gl.
+os.environ.setdefault("GSK_RENDERER", "cairo")
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
@@ -35,13 +38,16 @@ OPEN_MS = 240   # slide + fade in
 CLOSE_MS = 280  # slide + fade out
 
 CSS = b"""
-/* "I Found You" look: same near-black as the dock, the wallpaper crimson (#b1444d)
+/* Wallpaper Mood colours (defaults = the original "I Found You" palette; the live
+   values come from ~/.config/ubuntu_extension_marco/mood/gtk.css) */
+:root { --mood-accent: #b1444d; --mood-light: #d0606a; --mood-dark: #8e2a32; --mood-bg: #0e0c0c; }
+/* "I Found You" look: same near-black as the dock, the wallpaper crimson (var(--mood-accent))
    used by the dock's running dots and the notification badges, cream text. */
 window.dropshelf { background: transparent; box-shadow: none; font-family: "Ubuntu Sans"; }
 window.dropshelf .notch {
-  background: rgba(14, 12, 12, 0.94);
+  background: alpha(var(--mood-bg), 0.94);
   border-radius: 0 0 20px 20px;
-  border: 1px solid rgba(177, 68, 77, 0.30);
+  border: 1px solid alpha(var(--mood-accent), 0.30);
   border-top-width: 0;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   padding: 3px 14px 6px 14px;
@@ -54,15 +60,15 @@ window.dropshelf .notch.ghost {
   padding: 0; margin: 0; min-width: 260px; min-height: 8px;
 }
 window.dropshelf .notch.hot {
-  border-color: rgba(208, 96, 106, 0.95);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 -10px 22px rgba(177, 68, 77, 0.35);
+  border-color: alpha(var(--mood-light), 0.95);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 -10px 22px alpha(var(--mood-accent), 0.35);
 }
 .handle { color: #e6ddd3; font-weight: 600; font-size: 11px; }
-.handle-icon { color: #d0606a; }
+.handle-icon { color: var(--mood-light); }
 .badge {
-  background-image: linear-gradient(to bottom, #d0606a, #8e2a32);
-  color: #f5eee6; border-radius: 9px; border: 1px solid rgba(14, 12, 12, 0.9);
-  box-shadow: 0 0 8px rgba(177, 68, 77, 0.55);
+  background-image: linear-gradient(to bottom, var(--mood-light), var(--mood-dark));
+  color: #f5eee6; border-radius: 9px; border: 1px solid alpha(var(--mood-bg), 0.9);
+  box-shadow: 0 0 8px alpha(var(--mood-accent), 0.55);
   padding: 0 6px; font-size: 10px; font-weight: 700; min-height: 15px;
 }
 .hint { color: rgba(230, 221, 211, 0.55); font-size: 11px; padding: 14px 24px; }
@@ -70,11 +76,11 @@ window.dropshelf .notch.hot {
   padding: 1px 9px; min-height: 20px; border-radius: 8px; border: none; outline: none;
   color: #e6ddd3; background: rgba(230, 221, 211, 0.07); font-size: 10px; box-shadow: none;
 }
-.tool:hover { background: rgba(177, 68, 77, 0.45); }
-.tool:active { background: rgba(142, 42, 50, 0.70); }
+.tool:hover { background: alpha(var(--mood-accent), 0.45); }
+.tool:active { background: alpha(var(--mood-dark), 0.70); }
 .tool:disabled { color: rgba(230, 221, 211, 0.35); background: rgba(230, 221, 211, 0.04); }
 .tile { background: rgba(230, 221, 211, 0.05); border-radius: 12px; padding: 6px 4px 4px 4px; }
-.tile:hover { background: rgba(177, 68, 77, 0.22); }
+.tile:hover { background: alpha(var(--mood-accent), 0.22); }
 .tile.missing { opacity: 0.4; }
 .tile-name { color: #e6ddd3; font-size: 10px; }
 .textprev {
@@ -83,17 +89,43 @@ window.dropshelf .notch.hot {
 }
 .x {
   min-width: 16px; min-height: 16px; padding: 0; margin: 0; border-radius: 8px; border: none;
-  background: rgba(14, 12, 12, 0.80); color: #f5eee6; font-size: 9px; box-shadow: none; outline: none;
+  background: alpha(var(--mood-bg), 0.80); color: #f5eee6; font-size: 9px; box-shadow: none; outline: none;
 }
-.x:hover { background: #b1444d; }
+.x:hover { background: var(--mood-accent); }
 scrolledwindow, scrolledwindow > viewport { background: transparent; }
 /* the GTK theme (Yaru sage) would otherwise paint the scrollbar and tooltips green/grey */
 window.dropshelf scrollbar { background: transparent; border: none; }
-window.dropshelf scrollbar slider { background: rgba(177, 68, 77, 0.55); min-height: 4px; border: none; }
-window.dropshelf scrollbar slider:hover { background: #b1444d; }
-tooltip, tooltip.background { background: rgba(14, 12, 12, 0.96); color: #e6ddd3;
-  border: 1px solid rgba(177, 68, 77, 0.35); border-radius: 8px; }
+window.dropshelf scrollbar slider { background: alpha(var(--mood-accent), 0.55); min-height: 4px; border: none; }
+window.dropshelf scrollbar slider:hover { background: var(--mood-accent); }
+tooltip, tooltip.background { background: alpha(var(--mood-bg), 0.96); color: #e6ddd3;
+  border: 1px solid alpha(var(--mood-accent), 0.35); border-radius: 8px; }
 """
+
+MOOD_DIR = os.path.join(GLib.get_user_config_dir(), "ubuntu_extension_marco", "mood")
+
+
+def watch_mood(display, on_change=None):
+    """Wallpaper Mood: load its colour variables on top of ours and reload them live."""
+    prov = Gtk.CssProvider()
+    path = os.path.join(MOOD_DIR, "gtk.css")
+
+    def load(*_):
+        try:
+            with open(path) as f:
+                prov.load_from_string(f.read())
+        except OSError:
+            prov.load_from_string("")
+        if on_change:
+            on_change()
+
+    load()
+    Gtk.StyleContext.add_provider_for_display(display, prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+    os.makedirs(MOOD_DIR, exist_ok=True)
+    mon = Gio.File.new_for_path(MOOD_DIR).monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, None)
+    mon.connect("changed", lambda _m, f, o, _e: load() if "gtk.css" in (
+        f.get_basename(), o.get_basename() if o else None) else None)
+    return mon  # keep a reference, or the monitor stops
+
 
 
 def _value(gtype, obj):
@@ -527,6 +559,7 @@ class App(Gtk.Application):
             prov.load_from_data(CSS)
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
                                                       Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self._mood = watch_mood(Gdk.Display.get_default())
             self.win = Shelf(self)
             peek = Gio.SimpleAction.new("peek", None)
             peek.connect("activate", lambda *_: self.win.peek_open())

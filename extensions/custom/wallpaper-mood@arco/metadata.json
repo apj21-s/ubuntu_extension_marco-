@@ -1,0 +1,6 @@
+{
+  "uuid": "wallpaper-mood@arco",
+  "name": "Wallpaper Mood",
+  "description": "Recolours the desktop's custom extensions (badges, click ripple, charging ring, hotspot and screenshot cards, drag bar) to the wallpaper's accent colour, live. The colours come from ~/.local/bin/wallpaper-mood.",
+  "shell-version": ["50", "51"]
+}
