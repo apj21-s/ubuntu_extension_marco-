@@ -1,0 +1,12 @@
+/* Timers: countdown next to the clock. Wallpaper Mood recolours the icon. */
+.finder-timer { spacing: 5px; }
+.finder-timer-icon { color: #d0606a; icon-size: 15px; }
+.finder-timer-label { font-feature-settings: "tnum"; font-weight: 600; }
+.finder-timer-label.finder-timer-soon { color: #d0606a; }
+.finder-timer-row { spacing: 12px; }
+.finder-timer-left { font-feature-settings: "tnum"; color: rgba(230, 221, 211, 0.6); }
+.finder-timer-btn {
+  padding: 5px; border-radius: 99px; color: rgba(230, 221, 211, 0.75);
+  background-color: rgba(230, 221, 211, 0.06); transition-duration: 120ms;
+}
+.finder-timer-btn:hover, .finder-timer-btn:focus { background-color: rgba(177, 68, 77, 0.55); color: #f5eee6; }

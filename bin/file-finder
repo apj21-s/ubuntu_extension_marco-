@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 import zipfile
 
 import gi
@@ -953,6 +954,40 @@ def _fmt_secs(s):
     return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
+# Timers live in a file so they survive restarts and logouts. The Timers extension
+# (finder-timer@arco) shows the countdown in the top bar and rings when one ends.
+TIMERS = os.path.join(GLib.get_user_state_dir(), "file-finder", "timers.json")
+TIMER_EXT = "finder-timer@arco"
+
+
+def load_timers():
+    try:
+        with open(TIMERS) as f:
+            data = json.load(f)
+        return [t for t in data if isinstance(t, dict) and "end" in t] if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def save_timers(timers):
+    os.makedirs(os.path.dirname(TIMERS), exist_ok=True)
+    tmp = TIMERS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(sorted(timers, key=lambda t: t["end"]), f, indent=1)
+    os.replace(tmp, TIMERS)  # atomic: the extension never reads half a file
+
+
+def timer_extension_active():
+    try:
+        info = Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync("org.gnome.Shell.Extensions", "/org/gnome/Shell/Extensions",
+                                          "org.gnome.Shell.Extensions", "GetExtensionInfo",
+                                          GLib.Variant("(s)", (TIMER_EXT,)), None, Gio.DBusCallFlags.NONE,
+                                          1000, None).unpack()[0]
+        return info.get("state") == 1  # ENABLED / ACTIVE
+    except GLib.Error:
+        return False
+
+
 def _run(*argv):
     try:
         Gio.Subprocess.new(list(argv), Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
@@ -1029,7 +1064,8 @@ class Finder(Gtk.ApplicationWindow):
         self._was_active = False
         self._protected = set()  # results only the root helper could see
         self.mode = "files"
-        self.timers = []
+        self._backup_id = 0
+        self._arm_backup()  # rings due timers if the Timers extension isn't running
 
         self.live = LiveIndex()
         self.drives = Drives(self.live, self._index_changed)
@@ -1408,9 +1444,12 @@ class Finder(Gtk.ApplicationWindow):
                 [cmd(f"Nothing called “{arg}” is running", "", icon)]
         if name == "timer":
             if a in ("", "list", "cancel", "stop"):
-                rows = [cmd(f"Cancel {t['label'] or 'timer'}  ({_fmt_secs(t['end'] - time.time())} left)",
+                rows = [cmd(f"Cancel {t['label'] or 'timer'}  (" + (
+                            f"paused, {_fmt_secs(t['paused'])} left)" if t.get("paused")
+                            else f"{_fmt_secs(t['end'] - time.time())} left)"),
+                            "paused" if t.get("paused") else
                             f"ends at {time.strftime('%H:%M:%S', time.localtime(t['end']))}", icon,
-                            run=lambda t=t: self._cancel_timer(t)) for t in self.timers]
+                            run=lambda t=t: self._cancel_timer(t)) for t in load_timers()]
                 return rows or [cmd("No timers running", "> timer 25  starts a 25 minute timer", icon)]
             d = parse_duration(arg)
             if not d:
@@ -1456,24 +1495,41 @@ class Finder(Gtk.ApplicationWindow):
         return f"Quit {name} ({n})"
 
     def _start_timer(self, secs, label):
-        t = {"end": time.time() + secs, "label": label, "id": 0}
-
-        def ring():
-            if t in self.timers:
-                self.timers.remove(t)
-            _notify("Time's up" + (f": {label}" if label else ""), f"{_fmt_secs(secs)} timer finished")
-            _run("canberra-gtk-play", "-i", "complete")
-            return GLib.SOURCE_REMOVE
-
-        t["id"] = GLib.timeout_add_seconds(secs, ring)
-        self.timers.append(t)
+        timers = load_timers()
+        timers.append({"id": uuid.uuid4().hex[:8], "end": time.time() + secs, "secs": secs, "label": label})
+        save_timers(timers)
+        self._arm_backup()
         return f"Timer set: {_fmt_secs(secs)}" + (f" ({label})" if label else "")
 
     def _cancel_timer(self, t):
-        if t in self.timers:
-            GLib.source_remove(t["id"])
-            self.timers.remove(t)
+        save_timers([x for x in load_timers() if x.get("id") != t.get("id")])
+        self._arm_backup()
         return "Timer cancelled"
+
+    def _arm_backup(self):
+        """One wake-up a few seconds after the next timer is due; none while no timer runs."""
+        if self._backup_id:
+            GLib.source_remove(self._backup_id)
+            self._backup_id = 0
+        timers = [t for t in load_timers() if not t.get("paused")]
+        if timers:
+            wait = max(1, int(min(t["end"] for t in timers) - time.time()) + 3)
+            self._backup_id = GLib.timeout_add_seconds(wait, self._backup_ring)
+
+    def _backup_ring(self):
+        """Only when the Timers extension isn't running (e.g. right after installing it,
+        before logging in again): ring due timers from here instead."""
+        due = [t for t in load_timers() if t["end"] <= time.time() and not t.get("paused")]
+        if due and not timer_extension_active():
+            left = [t for t in load_timers() if t not in due]
+            save_timers(left)
+            for t in due:
+                label = t.get("label") or ""
+                _notify("Time's up" + (f": {label}" if label else ""), f"{_fmt_secs(t.get('secs', 0))} timer finished")
+            _run("canberra-gtk-play", "-i", "complete")
+        self._backup_id = 0
+        self._arm_backup()
+        return GLib.SOURCE_REMOVE
 
     # ---------- results ----------
     def fill(self, items, query, total=None, took=None, extra=None, cmd=False):
@@ -1640,7 +1696,7 @@ class Finder(Gtk.ApplicationWindow):
             files.launch_uris([uri], ctx)
         except GLib.Error:
             token = ctx.get_startup_notify_id(None, []) or ""
-            Gio.DBus.session.call("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+            Gio.bus_get_sync(Gio.BusType.SESSION, None).call("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
                                   "org.freedesktop.FileManager1", "ShowItems",
                                   GLib.Variant("(ass)", ([uri], token)),
                                   None, Gio.DBusCallFlags.NONE, 10000, None, None)

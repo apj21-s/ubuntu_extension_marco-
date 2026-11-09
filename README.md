@@ -45,6 +45,7 @@ Things you add yourself (deliberately not in the repo):
 | **Terminal Copy on Select** | Selecting text in a terminal copies it to the clipboard |
 | **Drop Shelf** | A hidden Mac-style shelf at the top center: rest the cursor at the top edge (or drag something there) and it slides out. Drop files, images or text on it, then drag them into any other window |
 | **Drag Switch** | While dragging from any app: hold over a dock icon to bring that app's window forward (even on another workspace), hold at the left/right screen edge to switch workspace, push to the dock edge to reveal a hidden dock |
+| **Timers** | Android-style timers from the File Finder (`> timer 25`, `> timer 10 tea`): a countdown next to the clock (click it to pause, add a minute or cancel), a quiet notification with Pause / +1 min / Cancel while it runs, and when it ends an alarm notification that stays on screen with the alarm sound repeating until Stop (or +1 min). Timers survive restarts and logouts |
 | **Wallpaper Mood** | The accent colour follows the wallpaper: change the wallpaper and the dock dots, notification badges, click ripple, charging ring, hotspot and screenshot cards, drag bar, Drop Shelf and File Finder all recolour to its most vivid colour within a second. `wallpaper-mood fixed` goes back to the fixed crimson, `wallpaper-mood auto` follows the wallpaper again |
 
 ### Desktop effects and add-ons (`extensions/third-party/`)

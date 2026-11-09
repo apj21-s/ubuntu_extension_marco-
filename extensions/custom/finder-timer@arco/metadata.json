@@ -1,0 +1,6 @@
+{
+  "uuid": "finder-timer@arco",
+  "name": "Timers",
+  "description": "Shows File Finder timers (> timer 25) as a countdown in the top bar, next to the clock. Click it to see or cancel them. Rings with a notification and sound when one ends, even after a logout.",
+  "shell-version": ["50", "51"]
+}
