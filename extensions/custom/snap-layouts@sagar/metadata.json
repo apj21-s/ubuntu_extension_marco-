@@ -1,0 +1,8 @@
+{
+  "uuid": "snap-layouts@sagar",
+  "name": "Snap Layouts",
+  "description": "Super+Z shows Windows-11-style snap layouts (halves, thirds, quarters...). Click a zone to snap the focused window there.",
+  "shell-version": ["48", "49", "50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.snap-layouts",
+  "version": 1
+}

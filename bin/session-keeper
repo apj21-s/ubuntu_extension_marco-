@@ -13,6 +13,7 @@ HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".local/state/session-keeper")
 CURRENT = os.path.join(STATE, "current.json")
 PREVIOUS = os.path.join(STATE, "previous.json")
+OFFERED = os.path.join(STATE, "offered")
 CGROUP = "/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service" % (os.getuid(), os.getuid())
 APP_DIRS = [os.path.join(HOME, ".local/share/applications"), "/usr/share/applications",
             "/var/lib/snapd/desktop/applications", "/usr/local/share/applications",
@@ -166,6 +167,14 @@ def restore(ask):
             notify("Nothing to restore", "No saved session from before the last restart.")
         return
     if ask:
+        # Ask only once per saved session, even if you click "Not now" or log in again.
+        key = str(s.get("time") or s.get("boot_id"))
+        try:
+            if open(OFFERED).read().strip() == key:
+                return
+        except OSError:
+            pass
+        open(OFFERED, "w").write(key)
         if notify("Restore your last session?", summary(s),
                   "restore=Restore", "skip=Not now") != "restore":
             return

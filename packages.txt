@@ -76,3 +76,9 @@ vainfo
 # needed by extensions but missing upstream: Vitals (GTop), Emoji Copy (Gda)
 gir1.2-gtop-2.0
 gir1.2-gda-5.0
+
+# Super+F file finder (fd), Space to preview files in Files (Sushi), login background (ffmpeg), boot animation engine
+fd-find
+gnome-sushi
+ffmpeg
+plymouth

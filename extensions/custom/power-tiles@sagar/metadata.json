@@ -1,0 +1,7 @@
+{
+  "uuid": "power-tiles@sagar",
+  "name": "Power Tiles",
+  "description": "Quick Settings: Lenovo battery conservation (80% cap, with 'charge to 100% once'), a Quiet / Balanced / Performance mode tile, and a top-bar icon while the NVIDIA GPU is awake.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

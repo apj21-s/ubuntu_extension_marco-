@@ -1,0 +1,23 @@
+#!/bin/bash
+# Reload the touchpad when multi-finger gestures, two-finger scroll or tap stop working.
+#   fix-touchpad          reload and show a notification
+#   fix-touchpad --quiet  reload and print one status line (used by refresh)
+quiet=0; [ "${1:-}" = "--quiet" ] && quiet=1
+key=org.gnome.desktop.peripherals.touchpad
+
+# 1. Full driver restart (password-free via /etc/sudoers.d/touchpad-reload).
+if [ -x /usr/local/sbin/touchpad-reload ] && sudo -n /usr/local/sbin/touchpad-reload >/dev/null 2>&1; then
+  how="driver restarted"
+else
+  how="settings re-applied"
+fi
+
+# 2. Make GNOME re-apply touchpad settings (gestures, tap, natural scroll).
+gsettings set $key send-events 'disabled'; sleep 0.4; gsettings set $key send-events 'enabled'
+
+msg="reloaded ($how)"
+if [ $quiet = 1 ]; then
+  echo "$msg"
+else
+  "$HOME/.local/bin/notify" -i input-touchpad-symbolic "Touchpad" "Touchpad $msg" 2>/dev/null || echo "Touchpad $msg"
+fi

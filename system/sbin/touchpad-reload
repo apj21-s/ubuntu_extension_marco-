@@ -1,0 +1,24 @@
+#!/bin/bash
+# Restart the touchpad driver (fixes dead multi-finger gestures / scrolling).
+# Takes no arguments, so it is safe to allow without a password (see sudoers/touchpad-reload).
+# I2C touchpads (most modern laptops) are unbound and rebound; PS/2 ones get psmouse reloaded.
+set -u
+done_any=0
+
+for drv in /sys/bus/i2c/drivers/i2c_hid_acpi /sys/bus/i2c/drivers/i2c_hid; do
+  [ -d "$drv" ] || continue
+  for dev in "$drv"/i2c-*; do
+    [ -e "$dev" ] || continue
+    grep -qiE 'touchpad|trackpad' "$dev"/*/*/input/input*/name 2>/dev/null \
+      || grep -qiE 'touchpad|trackpad' "$dev"/*/input/input*/name 2>/dev/null || continue
+    id=$(basename "$dev")
+    echo "$id" > "$drv/unbind" 2>/dev/null && sleep 0.5 && echo "$id" > "$drv/bind" 2>/dev/null && done_any=1
+  done
+done
+
+if [ $done_any = 0 ] && grep -qiE 'N: Name=.*(touchpad|synaptics|elantech|alps)' /proc/bus/input/devices \
+   && lsmod | grep -q '^psmouse '; then
+  modprobe -r psmouse && modprobe psmouse && done_any=1
+fi
+
+[ $done_any = 1 ] && echo "reloaded" || { echo "no touchpad found"; exit 1; }

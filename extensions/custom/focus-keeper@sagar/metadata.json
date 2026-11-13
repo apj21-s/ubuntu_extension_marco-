@@ -1,0 +1,7 @@
+{
+  "uuid": "focus-keeper@sagar",
+  "name": "Focus Keeper",
+  "description": "Returning to a workspace gives focus back to the window you were using there, instead of whatever window happens to be on top.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

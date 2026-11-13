@@ -1,0 +1,10 @@
+#!/bin/bash
+# Lenovo battery conservation mode (stops charging at ~80%). Usage: battery-cap on|off|status
+F=$(ls /sys/bus/platform/drivers/ideapad_acpi/*/conservation_mode 2>/dev/null | head -1)
+[ -n "$F" ] || { echo "unsupported"; exit 3; }
+case "$1" in
+  on)  echo 1 > "$F" ;;
+  off) echo 0 > "$F" ;;
+  status) [ "$(cat "$F")" = 1 ] && echo on || echo off ;;
+  *) echo "Usage: battery-cap on|off|status"; exit 2 ;;
+esac

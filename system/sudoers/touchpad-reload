@@ -1,0 +1,3 @@
+# Let @USER@ restart the touchpad driver without a password (used by fix-touchpad and Super+F5 Refresh).
+# The script takes no arguments.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/touchpad-reload

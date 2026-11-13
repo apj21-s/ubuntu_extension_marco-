@@ -1,0 +1,8 @@
+{
+  "uuid": "login-style@sagar",
+  "name": "Login Style",
+  "description": "Login screen and lock screen design for the 'I Found You' setup: frosted wallpaper, big clock with greeting, profile cards, crimson accents, and a 4-circle PIN that signs in on the 4th digit.",
+  "shell-version": ["48", "49", "50", "51"],
+  "session-modes": ["gdm", "unlock-dialog"],
+  "version": 2
+}

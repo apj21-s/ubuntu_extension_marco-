@@ -9,6 +9,10 @@ keys, API tokens, passwords, private IPs, location data, wallpaper/video files,
 and any word listed in ~/.config/ubuntu_extension_marco/private-words (kept
 only on your laptop - put your real name, e-mails, college name there).
 Your git e-mail is added to that list automatically.
+
+A line that only names something (e.g. a file name) can end with the comment
+`leak-check: ok` to skip the softer "own file" checks on that one line; the strict
+checks (home paths, keys, tokens, passwords) and private words still apply.
 """
 import os
 import re
@@ -102,6 +106,8 @@ def main():
             checks.update(OWN)
         for n, line in enumerate(text.splitlines(), 1):
             for name, rx in checks.items():
+                if name in OWN and name not in STRICT and "leak-check: ok" in line:
+                    continue
                 if rx.search(line):
                     problems.append((path, n, name))
             for rx in words:

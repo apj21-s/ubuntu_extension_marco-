@@ -1,0 +1,23 @@
+#!/bin/bash
+# Dynamic Island live activities (needs the island@sagar extension).
+#   island timer 5m | 90s | 1h30m | 25     (plain number = minutes)
+#   island stopwatch
+#   island stop                            (or click the island)
+#   island show "text" [icon-name]
+call() { gdbus call --session --dest org.sagar.Island --object-path /org/sagar/Island \
+           --method "org.sagar.Island.$1" "${@:2}" >/dev/null || { echo "Island isn't running (log out and back in once)."; exit 1; }; }
+secs() {
+  local s=$1 t=0
+  [[ $s =~ ^[0-9]+$ ]] && { echo $((s * 60)); return; }
+  [[ $s =~ ([0-9]+)h ]] && t=$((t + BASH_REMATCH[1] * 3600))
+  [[ $s =~ ([0-9]+)m ]] && t=$((t + BASH_REMATCH[1] * 60))
+  [[ $s =~ ([0-9]+)s ]] && t=$((t + BASH_REMATCH[1]))
+  echo $t
+}
+case "${1:-}" in
+  timer) t=$(secs "${2:-}"); [ "$t" -gt 0 ] 2>/dev/null || { echo "Usage: island timer 5m|90s|1h30m|25"; exit 2; }; call Timer "uint32 $t" ;;
+  stopwatch) call Stopwatch ;;
+  stop) call Stop ;;
+  show) call Show "${3:-dialog-information-symbolic}" "${2:-}" ;;
+  *) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

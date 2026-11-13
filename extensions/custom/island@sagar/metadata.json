@@ -1,0 +1,8 @@
+{
+  "uuid": "island@sagar",
+  "name": "Dynamic Island",
+  "description": "A morphing pill at the top center for volume/brightness (replaces the default pop-ups), Bluetooth connects with battery, 'Copied' confirmations, and live timers / stopwatch (island timer 5m).",
+  "shell-version": ["48", "49", "50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.island",
+  "version": 1
+}

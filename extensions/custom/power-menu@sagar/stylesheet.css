@@ -1,0 +1,30 @@
+/* Power Menu - frosted glass, "I Found You" colours */
+.pm-backdrop { background-color: rgba(8, 6, 6, 0.42); }
+.pm-column { spacing: 6px; }
+.pm-time { font-size: 40px; font-weight: 300; color: #f5eee6; text-shadow: 0 3px 20px rgba(0, 0, 0, 0.6); }
+.pm-sub { font-size: 14px; font-weight: 600; color: rgba(245, 238, 230, 0.88); }
+.pm-up { font-size: 11px; color: rgba(230, 221, 211, 0.5); letter-spacing: 1px; }
+.pm-line {
+  width: 40px; height: 2px; margin: 10px 0 18px 0; border-radius: 2px;
+  background-color: #b1444d; box-shadow: 0 0 12px rgba(208, 96, 106, 0.95);
+}
+.pm-row { spacing: 12px; }
+.pm-tile {
+  width: 88px; height: 92px; padding: 14px 6px 8px 6px; spacing: 7px;
+  border-radius: 20px;
+  background-color: rgba(18, 15, 15, 0.55);
+  border: 1px solid rgba(230, 221, 211, 0.10);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+  transition-duration: 160ms;
+}
+.pm-tile:selected, .pm-tile:hover {
+  background-color: rgba(177, 68, 77, 0.30);
+  border-color: rgba(208, 96, 106, 0.85);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4), 0 0 18px rgba(177, 68, 77, 0.55);
+}
+.pm-icon { icon-size: 26px; color: #f5eee6; }
+.pm-tile.danger .pm-icon { color: #e0707a; }
+.pm-tile.danger:selected .pm-icon, .pm-tile.danger:hover .pm-icon { color: #ffffff; }
+.pm-label { font-size: 12px; font-weight: 700; color: #f5eee6; }
+.pm-num { font-size: 9px; color: rgba(230, 221, 211, 0.38); }
+.pm-hint { font-size: 11px; letter-spacing: 1px; color: rgba(230, 221, 211, 0.42); margin-top: 18px; }

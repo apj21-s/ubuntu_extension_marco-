@@ -1,0 +1,78 @@
+# "I Found You" boot splash (Plymouth script plugin)
+Window.SetBackgroundTopColor(0.043, 0.035, 0.035);
+Window.SetBackgroundBottomColor(0.043, 0.035, 0.035);
+sw = Window.GetWidth();
+sh = Window.GetHeight();
+
+mask_img = Image("mask.png");
+mask = Sprite(mask_img);
+mask.SetX(sw / 2 - mask_img.GetWidth() / 2);
+mask.SetY(sh / 2 - mask_img.GetHeight() - 30);
+mask.SetOpacity(0);
+
+line_img = Image("line.png");
+line = Sprite(line_img);
+lx = sw / 2 - line_img.GetWidth() / 2;
+ly = sh / 2 + 10;
+line.SetX(lx);
+line.SetY(ly);
+line.SetOpacity(0);
+
+dot_img = Image("dot.png");
+dot = Sprite(dot_img);
+dot.SetY(ly + line_img.GetHeight() / 2 - dot_img.GetHeight() / 2);
+dot.SetOpacity(0);
+
+text_img = Image.Text("i   f o u n d   y o u", 0.76, 0.71, 0.67, 1, "Sans 13");
+text = Sprite(text_img);
+text.SetX(sw / 2 - text_img.GetWidth() / 2);
+text.SetY(ly + 46);
+text.SetOpacity(0);
+
+t = 0;
+fun refresh_callback() {
+  t = t + 1;
+  fade = t / 70;
+  if (fade > 1) fade = 1;
+  mask.SetOpacity(fade * (0.5 + 0.08 * Math.Sin(t / 40)));
+  line.SetOpacity(fade * (0.72 + 0.28 * Math.Sin(t / 16)));
+  text.SetOpacity(fade * 0.8);
+  span = line_img.GetWidth() - 70;
+  pos = span / 2 + (span / 2) * Math.Sin(t / 22);
+  dot.SetX(lx + 35 + pos - dot_img.GetWidth() / 2);
+  dot.SetOpacity(fade);
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# messages (e.g. disk checks) and password prompts, just in case
+msg = Sprite();
+msg.SetY(sh - 80);
+fun message_callback(text) {
+  img = Image.Text(text, 0.7, 0.66, 0.62, 1, "Sans 11");
+  msg.SetImage(img);
+  msg.SetX(sw / 2 - img.GetWidth() / 2);
+}
+Plymouth.SetMessageFunction(message_callback);
+
+prompt = Sprite();
+bullets = Sprite();
+fun display_password_callback(ptext, nbullets) {
+  pimg = Image.Text(ptext, 0.96, 0.93, 0.9, 1, "Sans 12");
+  prompt.SetImage(pimg);
+  prompt.SetX(sw / 2 - pimg.GetWidth() / 2);
+  prompt.SetY(ly + 90);
+  b = "";
+  for (i = 0; i < nbullets; i++) b = b + "● ";
+  bimg = Image.Text(b, 0.82, 0.38, 0.42, 1, "Sans 14");
+  bullets.SetImage(bimg);
+  bullets.SetX(sw / 2 - bimg.GetWidth() / 2);
+  bullets.SetY(ly + 120);
+  prompt.SetOpacity(1);
+  bullets.SetOpacity(1);
+}
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+fun display_normal_callback() {
+  prompt.SetOpacity(0);
+  bullets.SetOpacity(0);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_callback);

@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""find-files - instant file finder (Super+F). No background indexing: it asks `fd` live.
+
+  type            search your home folder (all words must match, any order)
+  Up / Down       move
+  Enter           open        Ctrl+Enter  show in Files      Ctrl+C  copy path
+  drag a result   drop the file into any app
+  Esc / click elsewhere   close
+"""
+import os
+import subprocess
+import time
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+APP_ID = "io.sagar.FindFiles"
+HOME = os.path.expanduser("~")
+MAX = 150
+FD = "fdfind" if GLib.find_program_in_path("fdfind") else "fd"
+EXCLUDES = [".git", "node_modules", ".cache", "__pycache__", ".local/share/Trash", "snap", ".cargo",
+            ".rustup", ".npm", ".var", ".mozilla", ".config/google-chrome", ".config/BraveSoftware",
+            ".setup-backup", ".marco-undo", "site-packages", ".venv", "venv"]
+
+CSS = b"""
+window.finder { background: transparent; }
+.panel { background: rgba(14,12,12,0.97); border-radius: 18px; border: 1px solid rgba(177,68,77,0.35); }
+.search { font-size: 17px; padding: 10px 14px; margin: 12px; border-radius: 12px; min-height: 26px;
+          background: rgba(230,221,211,0.07); color: #e6ddd3; border: none; box-shadow: none; outline: none; }
+.search:focus-within { box-shadow: inset 0 0 0 1px rgba(177,68,77,0.8); }
+list, list > row { background: transparent; }
+list > row { border-radius: 9px; margin: 0 8px; padding: 5px 8px; }
+list > row:selected, list > row:hover { background: rgba(177,68,77,0.35); }
+.name { color: #e6ddd3; font-size: 13px; }
+.dir { color: rgba(230,221,211,0.5); font-size: 10px; }
+.preview { background: rgba(230,221,211,0.04); border-radius: 12px; margin: 0 12px 12px 0; padding: 10px; }
+.pv-text { font-family: monospace; font-size: 10px; color: #d8cfc5; }
+.pv-meta { color: rgba(230,221,211,0.6); font-size: 11px; }
+.status { color: rgba(230,221,211,0.45); font-size: 10px; margin: 0 16px 10px 16px; }
+scrollbar slider { background: rgba(177,68,77,0.55); min-width: 4px; }
+"""
+
+
+def human(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+class Finder(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Find Files")
+        self.set_decorated(False)
+        self.set_default_size(820, 500)
+        self.add_css_class("finder")
+        self._proc = None
+        self._dragging = False
+        self._debounce = 0
+        self._gen = 0
+
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panel.add_css_class("panel")
+        self.set_child(panel)
+
+        self.entry = Gtk.SearchEntry(placeholder_text="Find files and folders in your home…")
+        self.entry.add_css_class("search")
+        self.entry.connect("search-changed", self._changed)
+        self.entry.connect("activate", lambda *_: self._open_selected(False))
+        panel.append(self.entry)
+
+        body = Gtk.Box(spacing=8, vexpand=True)
+        panel.append(body)
+        self.list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE)
+        self.list.connect("row-selected", self._selected)
+        self.list.connect("row-activated", lambda *_: self._open_selected(False))
+        sc = Gtk.ScrolledWindow(hexpand=True, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        sc.set_child(self.list)
+        body.append(sc)
+
+        self.preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, width_request=290)
+        self.preview.add_css_class("preview")
+        body.append(self.preview)
+
+        self.status = Gtk.Label(xalign=0, label="Type to search · Enter open · Ctrl+Enter show in Files · drag a result into any app")
+        self.status.add_css_class("status")
+        panel.append(self.status)
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._key)
+        self.add_controller(keys)
+        self.connect("notify::is-active", self._focus_changed)
+
+    # ---------- search ----------
+    def _changed(self, *_):
+        if self._debounce:
+            GLib.source_remove(self._debounce)
+        self._debounce = GLib.timeout_add(110, self._search)
+
+    def _search(self):
+        self._debounce = 0
+        q = self.entry.get_text().strip()
+        self._gen += 1
+        gen = self._gen
+        if self._proc:
+            try:
+                self._proc.force_exit()
+            except GLib.Error:
+                pass
+            self._proc = None
+        self._clear()
+        if not q:
+            self.status.set_label("Type to search · Enter open · Ctrl+Enter show in Files · drag a result into any app")
+            return GLib.SOURCE_REMOVE
+        words = q.lower().split()
+        argv = [FD, "--hidden", "--ignore-case", "--fixed-strings", "--max-results", "3000",
+                "--absolute-path", "--color", "never"]
+        for e in EXCLUDES:
+            argv += ["--exclude", e]
+        argv += ["--", max(words, key=len), HOME]
+        try:
+            self._proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error as e:
+            self.status.set_label(f"Search tool missing: {e.message}")
+            return GLib.SOURCE_REMOVE
+        t0 = time.monotonic()
+        self._proc.communicate_utf8_async(None, None, self._done, (gen, words, t0))
+        return GLib.SOURCE_REMOVE
+
+    def _done(self, proc, res, data):
+        gen, words, t0 = data
+        try:
+            _, out, _ = proc.communicate_utf8_finish(res)
+        except GLib.Error:
+            return
+        if gen != self._gen:
+            return
+        paths = [p.rstrip("/") for p in (out or "").splitlines() if p]
+        hits = [p for p in paths if all(w in p[len(HOME):].lower() for w in words)]
+
+        def score(p):
+            name = os.path.basename(p).lower()
+            first = words[0]
+            return (0 if name.startswith(first) else 1 if first in name else 2,
+                    p.count("/"), len(p))
+        hits.sort(key=score)
+        for p in hits[:MAX]:
+            self.list.append(self._row(p))
+        n = len(hits)
+        self.status.set_label(f"{n if n < 3000 else '3000+'} found in {time.monotonic() - t0:.2f}s"
+                              + (f" · showing {MAX}" if n > MAX else ""))
+        first = self.list.get_row_at_index(0)
+        if first:
+            self.list.select_row(first)
+
+    def _clear(self):
+        while (r := self.list.get_first_child()):
+            self.list.remove(r)
+        self._show_preview(None)
+
+    def _row(self, path):
+        row = Gtk.ListBoxRow()
+        row.path = path
+        box = Gtk.Box(spacing=10)
+        f = Gio.File.new_for_path(path)
+        try:
+            icon = f.query_info("standard::icon", Gio.FileQueryInfoFlags.NONE, None).get_icon()
+            img = Gtk.Image.new_from_gicon(icon)
+        except GLib.Error:
+            img = Gtk.Image.new_from_icon_name("text-x-generic")
+        img.set_pixel_size(28)
+        box.append(img)
+        txt = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        name = Gtk.Label(label=os.path.basename(path), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        name.add_css_class("name")
+        d = os.path.dirname(path).replace(HOME, "~", 1)
+        dirl = Gtk.Label(label=d, xalign=0, ellipsize=Pango.EllipsizeMode.START)
+        dirl.add_css_class("dir")
+        txt.append(name)
+        txt.append(dirl)
+        box.append(txt)
+        row.set_child(box)
+
+        src = Gtk.DragSource(actions=Gdk.DragAction.COPY)
+        src.connect("prepare", lambda *_: Gdk.ContentProvider.new_for_value(
+            self._filelist(path)))
+        src.connect("drag-begin", self._drag_begin)
+        src.connect("drag-cancel", self._drag_cancel)
+        src.connect("drag-end", self._drag_end)
+        row.add_controller(src)
+        return row
+
+    def _drag_begin(self, source, _drag):
+        # a drag takes focus away on Wayland - don't close until it's dropped
+        self._dragging = True
+        self._cancelled = False
+        w = source.get_widget()
+        source.set_icon(Gtk.WidgetPaintable.new(w), 20, 20)
+
+    def _drag_cancel(self, *_):
+        self._cancelled = True   # Esc, or dropped somewhere that didn't take it
+        return False
+
+    def _drag_end(self, *_):
+        self._dragging = False
+        if not self._cancelled:
+            # dropped into an app: close right away (Burn My Windows plays its dust effect)
+            GLib.timeout_add(120, lambda: self.close() or False)
+
+    @staticmethod
+    def _filelist(path):
+        v = GObject.Value()
+        v.init(Gdk.FileList)
+        v.set_boxed(Gdk.FileList.new_from_list([Gio.File.new_for_path(path)]))
+        return v
+
+    # ---------- preview ----------
+    def _selected(self, _lb, row):
+        self._show_preview(row.path if row else None)
+
+    def _show_preview(self, path):
+        while (c := self.preview.get_first_child()):
+            self.preview.remove(c)
+        if not path:
+            return
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        f = Gio.File.new_for_path(path)
+        ctype = ""
+        try:
+            info = f.query_info("standard::content-type,standard::icon", Gio.FileQueryInfoFlags.NONE, None)
+            ctype = info.get_content_type() or ""
+        except GLib.Error:
+            info = None
+        shown = False
+        if ctype.startswith("image/") and st.st_size < 40_000_000:
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 270, 300, True)
+                pic = Gtk.Picture.new_for_paintable(Gdk.Texture.new_for_pixbuf(pb))
+                pic.set_vexpand(True)
+                self.preview.append(pic)
+                shown = True
+            except GLib.Error:
+                pass
+        elif os.path.isfile(path) and (ctype.startswith("text/") or ctype in (
+                "application/json", "application/x-shellscript", "application/javascript",
+                "application/xml", "application/x-yaml", "application/toml")) and st.st_size < 2_000_000:
+            try:
+                with open(path, errors="replace") as fh:
+                    head = "".join(fh.readline() for _ in range(40))
+                lbl = Gtk.Label(label=head, xalign=0, yalign=0, wrap=True,
+                                wrap_mode=Pango.WrapMode.CHAR, selectable=False, vexpand=True)
+                lbl.add_css_class("pv-text")
+                sc = Gtk.ScrolledWindow(vexpand=True)
+                sc.set_child(lbl)
+                self.preview.append(sc)
+                shown = True
+            except OSError:
+                pass
+        if not shown and info:
+            img = Gtk.Image.new_from_gicon(info.get_icon())
+            img.set_pixel_size(96)
+            img.set_vexpand(True)
+            self.preview.append(img)
+        kind = "Folder" if os.path.isdir(path) else (Gio.content_type_get_description(ctype) if ctype else "File")
+        meta = Gtk.Label(xalign=0, wrap=True,
+                         label=f"{os.path.basename(path)}\n{kind}" +
+                               ("" if os.path.isdir(path) else f" · {human(st.st_size)}") +
+                               f"\nModified {time.strftime('%d %b %Y, %H:%M', time.localtime(st.st_mtime))}")
+        meta.add_css_class("pv-meta")
+        self.preview.append(meta)
+
+    # ---------- actions ----------
+    def _current(self):
+        r = self.list.get_selected_row()
+        return r.path if r else None
+
+    def _open_selected(self, reveal):
+        p = self._current()
+        if not p:
+            return
+        if reveal:
+            subprocess.Popen(["nautilus", "--select", p], start_new_session=True)
+        else:
+            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(p).get_uri(), None)
+        self.close()
+
+    def _key(self, _c, keyval, _code, state):
+        ctrl = state & Gdk.ModifierType.CONTROL_MASK
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and ctrl:
+            self._open_selected(True)
+            return True
+        if ctrl and keyval in (Gdk.KEY_c, Gdk.KEY_C) and self._current() \
+                and not self.entry.get_selection_bounds():
+            self.get_display().get_clipboard().set(self._current())
+            self.status.set_label("Path copied")
+            return True
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_Up):
+            r = self.list.get_selected_row()
+            i = (r.get_index() if r else -1) + (1 if keyval == Gdk.KEY_Down else -1)
+            nxt = self.list.get_row_at_index(max(0, i))
+            if nxt:
+                self.list.select_row(nxt)
+                nxt.grab_focus()
+                self.entry.grab_focus_without_selecting()
+            return True
+        return False
+
+    def _focus_changed(self, *_):
+        # close when you click somewhere else (like Spotlight); small delay for drag-out
+        if not self.is_active() and not self._dragging:
+            GLib.timeout_add(250, lambda: (not self.is_active()) and (not self._dragging) and self.close() and False)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        win = self.get_active_window()
+        if win:  # Super+F again toggles it closed
+            win.close()
+            return
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        win = Finder(self)
+        win.present()
+        win.entry.grab_focus()
+
+
+if __name__ == "__main__":
+    raise SystemExit(App().run(None))

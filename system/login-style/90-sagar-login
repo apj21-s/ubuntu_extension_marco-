@@ -1,0 +1,18 @@
+# Login screen look for the "I Found You" setup (installed by system/install-system.sh)
+[org/gnome/shell]
+enabled-extensions=['login-style@sagar']
+disable-user-extensions=false
+
+[org/gnome/desktop/interface]
+clock-format='12h'
+color-scheme='prefer-dark'
+accent-color='red'
+cursor-theme='IFoundYou-Premium'
+clock-show-date=true
+clock-show-weekday=true
+
+[org/gnome/desktop/peripherals/touchpad]
+tap-to-click=true
+
+[org/gnome/login-screen]
+logo=''

@@ -1,0 +1,8 @@
+{
+  "uuid": "power-menu@sagar",
+  "name": "Power Menu",
+  "description": "Alt+F4 on the desktop opens a frosted-glass power menu (Lock, Sleep, Restart, Shut down, Log out). With a window focused, Alt+F4 still closes that window.",
+  "shell-version": ["48", "49", "50", "51"],
+  "settings-schema": "org.gnome.shell.extensions.power-menu",
+  "version": 1
+}

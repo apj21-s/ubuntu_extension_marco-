@@ -1,0 +1,7 @@
+#!/bin/sh
+# After waking from sleep, some I2C touchpads (e.g. Synaptics SYNA2BA6) come back in plain
+# mouse mode: 2-, 3- and 4-finger gestures all act like one finger. Restart the driver to fix it.
+case "$1" in
+  post) [ -x /usr/local/sbin/touchpad-reload ] && /usr/local/sbin/touchpad-reload >/dev/null 2>&1 ;;
+esac
+exit 0

@@ -1,0 +1,99 @@
+/* Login Style v3 - "I Found You": frosted wallpaper, near-black glass, crimson accents.
+   Palette: near-black #0e0c0c, crimson #b1444d, light crimson #d0606a, cream #f5eee6 */
+
+/* ---------- background ---------- */
+#lockDialogGroup {  /* fallback under the drifting layer */
+  background: #0b0909 url("file:///usr/share/backgrounds/sagar-login.jpg");
+  background-size: cover;
+  background-position: center;
+}
+.ls-drift {
+  background-image: url("file:///usr/share/backgrounds/sagar-login.jpg");
+  background-size: cover;
+  background-position: center;
+}
+
+/* ---------- clock block (login screen) ---------- */
+.ls-clock { spacing: 0; }
+.ls-time {
+  font-family: "Ubuntu Sans", "Cantarell", sans-serif;
+  font-size: 98px; font-weight: 300; color: #f5eee6;
+  text-shadow: 0 3px 22px rgba(0, 0, 0, 0.6);
+}
+.ls-date { font-size: 20px; font-weight: 600; color: rgba(245, 238, 230, 0.9); letter-spacing: 0.5px; }
+.ls-line {
+  width: 52px; height: 2px; margin: 14px 0 10px 0; border-radius: 2px;
+  background-color: #b1444d; box-shadow: 0 0 12px rgba(208, 96, 106, 0.95);
+}
+.ls-greet { font-size: 15px; color: rgba(230, 221, 211, 0.7); letter-spacing: 1.5px; }
+.ls-quote {
+  font-size: 14.5px; font-style: italic; color: rgba(230, 221, 211, 0.55);
+  margin-top: 12px; max-width: 700px; text-align: center;
+}
+.ls-sign { font-size: 15px; letter-spacing: 4px; color: rgba(230, 221, 211, 0.40); }
+
+/* ---------- status chips ---------- */
+.ls-chips { spacing: 10px; margin-top: 12px; }
+.ls-chip {
+  spacing: 6px; padding: 4px 11px; border-radius: 99px;
+  background-color: rgba(14, 12, 12, 0.55);
+  border: 1px solid rgba(230, 221, 211, 0.10);
+}
+.ls-chip-icon { color: #d0606a; }
+.ls-chip-label { font-size: 11.5px; font-weight: 600; color: rgba(245, 238, 230, 0.85); }
+.ls-lock-chips .ls-chip { background-color: rgba(14, 12, 12, 0.62); padding: 5px 13px; }
+
+/* ---------- profile cards (login screen) ---------- */
+.login-dialog-user-list { spacing: 28px; }
+.login-dialog-user-list-item.ls-card {
+  padding: 24px 34px 20px 34px; border-radius: 28px;
+  background-color: rgba(14, 12, 12, 0.5);
+  border: 1px solid rgba(230, 221, 211, 0.09);
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6);           /* dark halo */
+}
+.login-dialog-user-list-item.ls-card:hover,
+.login-dialog-user-list-item.ls-card:focus {
+  background-color: rgba(177, 68, 77, 0.24);
+  border-color: rgba(208, 96, 106, 0.6);
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6), 0 0 26px rgba(177, 68, 77, 0.35);
+}
+.user-widget.vertical { spacing: 12px; }
+.user-widget.vertical .user-icon {
+  icon-size: 116px;
+  border: 3px solid rgba(208, 96, 106, 0.95);
+  box-shadow: 0 0 0 6px rgba(14, 12, 12, 0.35), 0 8px 40px rgba(0, 0, 0, 0.75);  /* halo */
+}
+.user-widget.vertical .user-widget-label {
+  font-size: 22px; font-weight: 700; color: #f5eee6;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
+}
+.login-dialog-not-listed-label, .login-dialog-not-listed-button { color: rgba(230, 221, 211, 0.55); }
+
+/* ---------- prompt (both screens) ---------- */
+.login-dialog-prompt-entry {
+  background-color: rgba(14, 12, 12, 0.72); color: #f5eee6;
+  border: 1px solid rgba(177, 68, 77, 0.45); border-radius: 14px;
+}
+.login-dialog-prompt-entry:focus { border-color: #d0606a; }
+.login-dialog-button { color: #e6ddd3; background-color: rgba(230, 221, 211, 0.08); border-radius: 99px; }
+.login-dialog-button:hover, .login-dialog-button:focus { background-color: rgba(177, 68, 77, 0.45); }
+.login-dialog-message { color: rgba(230, 221, 211, 0.8); }
+.login-dialog-message-warning { color: #d0606a; }
+
+/* ---------- 4-circle PIN ---------- */
+.pin-box { spacing: 10px; padding: 4px 14px 8px 14px; }
+.pin-hint { font-size: 12px; font-weight: 600; letter-spacing: 2px; color: rgba(245, 238, 230, 0.55); }
+.pin-hint.error { color: #e0707a; }
+.pin-hint.ok { color: #f5eee6; }
+.pin-dots { spacing: 22px; padding: 6px 4px; }
+.pin-dot {
+  width: 18px; height: 18px; border-radius: 99px;
+  border: 2px solid rgba(245, 238, 230, 0.8);
+  background-color: rgba(14, 12, 12, 0.25);
+  transition-duration: 140ms;
+}
+.pin-dot:filled {
+  border-color: #e0707a;
+  background-color: #d0606a;
+  box-shadow: 0 0 14px rgba(208, 96, 106, 0.95);
+}

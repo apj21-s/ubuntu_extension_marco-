@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=I Found You
+Description=Dark boot splash: faint mask, a glowing crimson line with a sweeping light, "i found you"
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/i-found-you
+ScriptFile=/usr/share/plymouth/themes/i-found-you/i-found-you.script

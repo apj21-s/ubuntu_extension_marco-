@@ -98,6 +98,55 @@ else
   echo "   No 'Hotspot' connection yet: turn on Wi-Fi Hotspot once in Settings (name it 'Hotspot')."
 fi
 
+step "Touchpad reload helper (used by fix-touchpad and Super+F5 Refresh)"
+put "$SRC/sbin/touchpad-reload" /usr/local/sbin/touchpad-reload 755
+put "$SRC/system-sleep/touchpad-reload" /usr/lib/systemd/system-sleep/touchpad-reload 755   # also after waking from sleep
+
+step "Lock screen and login screen (frosted background, big clock, quotes, 4-circle PIN)"
+E=/usr/share/gnome-shell/extensions/login-style@sagar
+rm -rf "$E"; install -d "$E"; install -m 644 "$SRC/login-style/extension/"* "$E/"
+install -D -m 644 "$REPO/config/welcome/quotes.txt" /usr/share/login-style/quotes.txt
+[ -d /usr/share/icons/IFoundYou-Premium ] || cp -r "$REPO/themes/icons/IFoundYou-Premium" /usr/share/icons/   # login-screen cursor
+chmod -R a+rX /usr/share/icons/IFoundYou-Premium
+[ -e /etc/dconf/profile/gdm ] || put "$SRC/login-style/gdm-profile" /etc/dconf/profile/gdm 644
+put "$SRC/login-style/90-sagar-login" /etc/dconf/db/gdm.d/90-sagar-login 644
+dconf update
+# Background: a blurred, darkened copy of your wallpaper (the wallpaper itself isn't in the repo).
+WP="$T_HOME/.config/background"
+[ -f "$WP" ] || WP=$(ls /usr/share/backgrounds/*.jpg /usr/share/backgrounds/*.png 2>/dev/null | grep -v sagar-login | head -1)
+if [ -n "$WP" ] && command -v ffmpeg >/dev/null; then
+  ffmpeg -loglevel error -y -i "$WP" -frames:v 1 -vf \
+    "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,gblur=sigma=45,eq=brightness=-0.25" \
+    /usr/share/backgrounds/sagar-login.jpg && echo "   background made from $WP"
+fi
+echo "   The lock screen picks it up after you log out and back in."
+
+step "Boot and restart animation (Plymouth theme 'I Found You')"
+P=/usr/share/plymouth/themes/i-found-you
+install -d "$P"; install -m 644 "$SRC/plymouth/i-found-you/"* "$P/"
+update-alternatives --install /usr/share/plymouth/themes/default.plymouth default.plymouth "$P/i-found-you.plymouth" 200 >/dev/null
+update-alternatives --set default.plymouth "$P/i-found-you.plymouth" >/dev/null
+echo "   rebuilding the boot image (30-60 s)..."
+update-initramfs -u >/dev/null 2>&1 && echo "   done" || echo "   update-initramfs failed - the old boot animation stays"
+
+step "Battery 80% cap helper (Power Tiles tile; Lenovo laptops only)"
+put "$SRC/sbin/battery-cap" /usr/local/sbin/battery-cap 755
+
+step "NVIDIA GPU sleeps when idle (saves battery on hybrid-graphics laptops)"
+if lspci -d 10de: 2>/dev/null | grep -q .; then
+  put "$SRC/udev/80-nvidia-runtime-pm.rules" /etc/udev/rules.d/80-nvidia-runtime-pm.rules 644
+  udevadm control --reload
+  for d in /sys/bus/pci/devices/*; do
+    [ "$(cat "$d/vendor" 2>/dev/null)" = 0x10de ] && echo auto > "$d/power/control" 2>/dev/null
+  done
+  echo "   applied"
+else
+  echo "   skipped (no NVIDIA GPU)"
+fi
+
+step "Wi-Fi region: India (all Indian Wi-Fi channels; change IN in system/modprobe/cfg80211.conf elsewhere)"
+put "$SRC/modprobe/cfg80211.conf" /etc/modprobe.d/cfg80211.conf 644
+
 step "Password-free helpers (sudo rules)"
 for f in "$SRC"/sudoers/*; do
   dest=/etc/sudoers.d/$(basename "$f")
@@ -119,6 +168,7 @@ if git clone -q https://github.com/kancko/gnome-rounded-blur "$B/src" && git -C 
   ( cd "$B/src" && meson setup build --prefix=/usr --libdir=lib >/dev/null && meson compile -C build >/dev/null && meson install -C build >/dev/null ) \
     && echo "   installed" || echo "   build failed - the music pill still works, just without its blur"
 fi
+[ -n "${MARCO_STATE:-}" ] && cp "$B/src/build/meson-logs/install-log.txt" "$MARCO_STATE/rounded-blur-install-log.txt" 2>/dev/null
 rm -rf "$B"
 
 echo

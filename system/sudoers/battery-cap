@@ -1,0 +1,2 @@
+# Let @USER@ switch Lenovo battery conservation mode (80% cap) without a password (Power Tiles).
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/battery-cap on, /usr/local/sbin/battery-cap off

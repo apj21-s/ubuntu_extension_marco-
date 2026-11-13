@@ -49,6 +49,13 @@ Things you add yourself (deliberately not in the repo):
 | **Phone Drop** | AirDrop without an app: `Super+B` (or the Drop Shelf's Phone button, Files > right-click > Scripts > Send to phone, `> phone`, or Shift+Enter on a File Finder result) shows a QR code. The phone's camera opens a page to download the files (or all as a zip) and to upload files back into `~/Downloads/Phone Drop/`. Works over your hotspot or the same Wi-Fi; the secret link only works while the window is open |
 | **Timers** | Android-style timers from the File Finder (`> timer 25`, `> timer 10 tea`): a countdown next to the clock (click it to pause, add a minute or cancel), a quiet notification with Pause / +1 min / Cancel while it runs, and when it ends an alarm notification that stays on screen with the alarm sound repeating until Stop (or +1 min). Timers survive restarts and logouts |
 | **Wallpaper Mood** | The accent colour follows the wallpaper: change the wallpaper and the dock dots, notification badges, click ripple, charging ring, hotspot and screenshot cards, drag bar, Drop Shelf and File Finder all recolour to its most vivid colour within a second. `wallpaper-mood fixed` goes back to the fixed crimson, `wallpaper-mood auto` follows the wallpaper again |
+| **Island** | A pill at the top centre for volume and brightness pop-ups, Bluetooth connects, timers and a stopwatch (`island` command for live activities) |
+| **Snap Layouts** | `Super+Z` shows Windows 11-style snap zones for the focused window |
+| **Power Menu** | `Alt+F4` on the desktop opens a frosted-glass Lock / Sleep / Restart / Shut down menu (on a window it still closes the window) |
+| **Power Tiles** | Quick Settings tiles for the battery 80% cap (Lenovo conservation mode) and Quiet / Balanced / Performance |
+| **Auto DND** | Do Not Disturb turns on by itself while the mic or camera is in use or the screen is shared |
+| **Focus Keeper** | Going back to a workspace focuses the window you were last using there |
+| **Fake Airplane** | Shows Airplane Mode in the top bar without changing your real network (`fake-mode` command) |
 
 ### Desktop effects and add-ons (`extensions/third-party/`)
 These are exact copies of the installed versions, including my small tweak to Dynamic Music Pill: the visualizer glows in the album cover's color, and the pill also shows on the lock screen. Each one keeps its original license.
@@ -89,6 +96,8 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `Super+P` | Pop out the focused window (picture-in-picture); again to close it |
 | `Super+B` | Phone Drop: send or get files with your phone by QR code |
 | `Super+F5` | Windows-style refresh (flash + quick health check) |
+| `Super+Z` | Snap layouts |
+| `Alt+F4` (on the desktop) | Power menu |
 | `Super+V` | Clipboard history |
 | `Super+Q` | Show the dock |
 | `Super+H` | Minimize |
@@ -101,8 +110,9 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `power-auto` | Power Saver on battery, Balanced on charger; on battery it also turns off the music pill's live visualizer |
 | `headphone-magic` | Pauses music when headphones are unplugged and resumes it when they're plugged back in (wired and Bluetooth) |
 | `organize-downloads` | Sorts new downloads into folders (PDFs, Images, Documents…); old installers go to the Trash after 30 days |
-| `session-keeper` | Remembers open apps, folders and terminal tabs, and offers to reopen them after a restart |
+| `session-keeper` | Remembers open apps, folders and terminal tabs, and offers once at login to reopen them after a restart |
 | `fix-audio` | Restarts the sound system if it breaks, and checks at login |
+| `fix-touchpad` | Reloads the touchpad when multi-finger gestures, scrolling or tap stop working (Super+F5 Refresh does it too, and it runs by itself after waking from sleep) |
 | `refresh` / `refresh-flash` | Windows-style refresh with a health report |
 | `ocr-copy`, `screen-area` | Copy text from the screen |
 | `ask-chatgpt` | ChatGPT helpers for the shortcuts above |
@@ -117,6 +127,9 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `file-finder` | The Super+F file finder (starts hidden at login). Searches the system file index (refreshed every 15 min on the charger, hourly on battery, and after every apt install), watches the home folder and USB drives live so brand-new files show at once, indexes each USB drive when plugged in, and hides deleted files. The lock button (Ctrl+Shift+A) also searches protected files after one password popup |
 | `phone-drop` | Phone Drop: `phone-drop FILE...` shares files with your phone by QR code; on its own it receives |
 | `wallpaper-mood` | Works out the accent colours from the wallpaper (the Wallpaper Mood extension runs it when the wallpaper changes) |
+| `find-files` | A lighter file finder for your home folder, using `fd` with no background indexing. No shortcut by default (Super+F opens File Finder) |
+| `island` | Send live activities (timers, progress) to the Island pill |
+| `fake-mode` | Turn Fake Airplane on or off |
 
 ### Background services (`systemd/user/`)
 `power-auto`, `headphone-magic`, `fix-audio-login`, `organize-downloads` (path + daily timer), `session-keeper` (save every 2 min + restore at login), `weekly-tidy` (Sundays) and `ambient` (idle monitor, off by default). File indexing (localsearch/tracker) is switched off.
@@ -126,6 +139,9 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 - **Sound theme**: `i-found-you`, soft original sounds generated by `tools/make_sounds.py`.
 - **Terminal**: Ptyxis with the `I Found You` palette at 83% opacity and frosted blur, a two-line crimson prompt with git branch and error code, `eza`, `bat`, `fzf`, `zoxide`, and fastfetch.
 - **Theme**: Yaru-sage-dark, dark mode, auto-hiding translucent dock, Night Light.
+- **Lock and login screen** (`login-style@sagar`, installed system-wide by the system part): frosted background made from your wallpaper, big clock with greeting and quotes, profile cards, crimson accents, and a 4-circle PIN that signs in on the 4th digit (a letter or a 5th character brings back the normal password box)
+- **Boot and restart animation**: Plymouth theme `I Found You` (faint mask, glowing crimson line, "i found you")
+- **Space** in Files previews the selected file (GNOME Sushi)
 
 ### System part (`system/`)
 - zram swap (1.5× RAM, zstd), earlyoom, and tuned memory settings (swappiness, MGLRU)
@@ -137,6 +153,10 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 - Hotspot automatically turns on Stay Awake
 - Sudo rules so `docker-toggle` and `hotspot-devices` don't ask for a password
 - Intel SOF sound fix (only applied on Intel laptops that need it)
+- Login screen settings (no Ubuntu logo, 12-hour clock, dark mode, red accent, IFoundYou cursor, tap-to-click), lock/login extension and boot animation
+- `battery-cap` helper + sudo rule for the Power Tiles 80% battery cap (Lenovo)
+- NVIDIA GPU powers down when idle (only applied on laptops with an NVIDIA GPU)
+- Wi-Fi region set to India (`system/modprobe/cfg80211.conf`; change `IN` for another country)
 
 ---
 

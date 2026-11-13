@@ -1,0 +1,7 @@
+{
+  "uuid": "auto-dnd@sagar",
+  "name": "Auto Do Not Disturb",
+  "description": "Turns Do Not Disturb on while the microphone or camera is in use, while the screen is shared or recorded, or while an app is fullscreen - and back off afterwards (only if it turned it on).",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

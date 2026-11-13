@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.snap-layouts" path="/org/gnome/shell/extensions/snap-layouts/">
+    <key name="show-layouts" type="as">
+      <default><![CDATA[['<Super>z']]]></default>
+      <summary>Show snap layouts</summary>
+    </key>
+    <key name="gap" type="i">
+      <default>8</default>
+      <summary>Gap between snapped windows (px)</summary>
+    </key>
+  </schema>
+</schemalist>

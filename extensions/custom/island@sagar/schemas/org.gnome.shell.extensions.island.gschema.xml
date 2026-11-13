@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.island" path="/org/gnome/shell/extensions/island/">
+    <key name="replace-osd" type="b"><default>true</default><summary>Show volume/brightness pop-ups in the island</summary></key>
+    <key name="show-bluetooth" type="b"><default>true</default><summary>Show Bluetooth connect/disconnect</summary></key>
+    <key name="show-copied" type="b"><default>true</default><summary>Show a 'Copied' confirmation</summary></key>
+  </schema>
+</schemalist>

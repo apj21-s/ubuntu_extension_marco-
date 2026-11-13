@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.power-menu" path="/org/gnome/shell/extensions/power-menu/">
+    <key name="show-power-menu" type="as">
+      <default><![CDATA[['<Alt>F4']]]></default>
+      <summary>Close window, or open the power menu on the desktop</summary>
+    </key>
+    <key name="saved-close-binding" type="as">
+      <default>[]</default>
+      <summary>The window 'close' shortcut before this extension took over Alt+F4 (restored on disable)</summary>
+    </key>
+  </schema>
+</schemalist>

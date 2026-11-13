@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# fake-mode on|off|toggle|status  — fake Airplane Mode in the top bar.
+# Real networking is untouched; only what the panel shows changes.
+FLAG="${XDG_CONFIG_HOME:-$HOME/.config}/fake-airplane/on"
+SPEED=InternetSpeedMeter@alshakib.dev     # its speed readout would give it away
+MARK="${XDG_CONFIG_HOME:-$HOME/.config}/fake-airplane/speedmeter-was-on"
+mkdir -p "$(dirname "$FLAG")"
+if ! gnome-extensions info fake-airplane@sagar 2>/dev/null | grep -q 'State: ACTIVE'; then
+  echo "warning: the Fake Airplane extension isn't running yet, so nothing will change on screen." >&2
+  echo "         Log out and back in once, then run this again." >&2
+fi
+
+on() {
+  if gnome-extensions info "$SPEED" 2>/dev/null | grep -qE 'State: (ACTIVE|ENABLED)'; then
+    gnome-extensions disable "$SPEED" && touch "$MARK"
+  fi
+  touch "$FLAG"; echo "fake airplane mode: ON"
+}
+off() {
+  rm -f "$FLAG"
+  if [ -e "$MARK" ]; then gnome-extensions enable "$SPEED"; rm -f "$MARK"; fi
+  echo "fake airplane mode: OFF"
+}
+case "${1:-toggle}" in
+  on) on ;;
+  off) off ;;
+  toggle) [ -e "$FLAG" ] && off || on ;;
+  status) [ -e "$FLAG" ] && echo ON || echo OFF ;;
+  *) echo "usage: fake-mode on|off|toggle|status"; exit 1 ;;
+esac

@@ -22,14 +22,18 @@ else
   esac
 fi
 
-# 3. Internet check.
+# 3. Touchpad: reload so multi-finger gestures and scrolling come back if they died.
+r=$("$HOME/.local/bin/fix-touchpad" --quiet 2>/dev/null)
+report+=("✔ Touchpad: ${r:-reloaded}")
+
+# 4. Internet check.
 if curl -s -m 4 -o /dev/null https://connectivitycheck.gstatic.com/generate_204; then
   report+=("✔ Internet: connected")
 else
   report+=("✖ Internet: not connected - check Wi-Fi/LAN"); problems=1
 fi
 
-# 4. Health line.
+# 5. Health line.
 ram=$(free -m | awk '/Mem/{printf "%d%%", ($2-$7)*100/$2}')
 disk=$(df / | awk 'NR==2{print $5}')
 temp=$(sensors 2>/dev/null | awk '/Package id 0/{print $4; exit}')

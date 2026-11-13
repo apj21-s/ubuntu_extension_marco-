@@ -13,11 +13,13 @@
     "key": { "width": 12 }
   },
   "modules": [
-    { "type": "custom", "format": "\u001b[1;38;2;245;238;230marco\u001b[0m\u001b[38;2;110;98;96m  ·  hp 250 g9  ·  ubuntu 26.04\u001b[0m" },
+    // header: your user name · laptop model · OS, read from this machine each time
+    { "type": "command", "key": " ", "keyWidth": 1, "shell": "/bin/sh", "text": "v=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null); m=$(cat /sys/class/dmi/id/product_version 2>/dev/null); case \"$m\" in ''|*'efault'*|*'ystem'*|*one|*'o be filled'*) m=$(cat /sys/class/dmi/id/product_name 2>/dev/null);; esac; . /etc/os-release; h=$(printf '%s %s' \"$v\" \"$m\" | sed 's/ *$//' | tr A-Z a-z); printf '\\033[1;38;2;245;238;230m%s\\033[0m\\033[38;2;110;98;96m  ·  %s  ·  %s\\033[0m' \"$USER\" \"$h\" \"$(printf '%s %s' \"$ID\" \"$VERSION_ID\")\"" },
     { "type": "custom", "format": "\u001b[38;2;74;64;64m──────────────────────────────────────────\u001b[0m" },
     { "type": "kernel",  "key": "◆ kernel" },
     { "type": "uptime",  "key": "◆ uptime" },
-    { "type": "cpu",     "key": "◆ cpu", "format": "i3-1215U · {cores-logical} threads · {freq-max}" },
+    // short CPU name, read from this machine (was hardcoded to the original laptop's i3-1215U)
+    { "type": "command", "key": "◆ cpu", "shell": "/bin/sh", "text": "n=$(sed -n 's/^model name[^:]*: *//p' /proc/cpuinfo | head -1); s=$(echo \"$n\" | grep -oE '(i[3579]-[0-9]+[A-Z]*|Ultra [3579] [0-9]+[A-Z]*|Ryzen [3579] [0-9]+[A-Z0-9]*|Ryzen AI [0-9]+ [A-Z0-9 ]+|Celeron [A-Z0-9-]+|Pentium [A-Z0-9-]+)' | head -1); [ -n \"$s\" ] || s=$(echo \"$n\" | sed 's/([RT]M)//g; s/ CPU.*//; s/  */ /g'); f=$(cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | sort -n | tail -1); printf '%s · %s threads' \"$s\" \"$(nproc)\"; [ -n \"$f\" ] && awk -v f=$f 'BEGIN{printf \" · %.2f GHz\", f/1000000}'" },
     { "type": "memory",  "key": "◆ memory" },
     { "type": "disk",    "key": "◆ disk", "folders": "/", "format": "{size-used} / {size-total} ({size-percentage})" },
     { "type": "battery", "key": "◆ battery", "format": "{capacity} · {status}" },

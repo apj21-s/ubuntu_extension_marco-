@@ -1,0 +1,7 @@
+{
+  "uuid": "fake-airplane@sagar",
+  "name": "Fake Airplane Mode",
+  "description": "While ~/.config/fake-airplane/on exists, the top bar shows Airplane Mode and hides every network sign (Wi-Fi, wired, VPN), while the real connection keeps working. Toggle with the `fake-mode` command.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}
