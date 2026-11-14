@@ -1,0 +1,7 @@
+# Manual corrections, only for when the automatic owner is wrong.
+# The automatic owner is: the "@name" at the end of an extension folder if that name is
+# in tools/authors.txt, otherwise whoever first committed the file.
+#   path-or-step-title    owner
+# Examples:
+#   bin/some-script    sagar
+#   step:Weekly system tidy (Sundays)    arco

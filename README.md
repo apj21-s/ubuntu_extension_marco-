@@ -25,6 +25,22 @@ To see everything it would do without changing anything, run `./install.sh --dry
 
 Everything that gets replaced is backed up first to `~/.ubuntu_extension_marco-backup-<date>/`. That includes a full copy of your settings (`dconf-full.ini`), which you can restore with `dconf load / < dconf-full.ini`.
 
+### Install only one person's features
+
+Every feature is tagged with who made it (arco, sagar, ...). The full list is in **[FEATURES.md](FEATURES.md)**.
+
+```bash
+./install.sh --list                    # who made which feature
+./install.sh --only arco               # only arco's features
+./install.sh --only arco --dry-run     # preview that first
+./install.sh --skip sagar              # everything except sagar's
+./install.sh --only arco,sagar         # several people
+```
+
+The shared base is always installed: themes, cursor, sounds, desktop settings, packages and apps. The filter also applies to the system part, which skips the boot animation, lock screen and other steps made by people you left out.
+
+FEATURES.md and `features.tsv` update themselves. The pre-commit hook regenerates them on every commit, and `.github/workflows/features.yml` regenerates them on every push. The owner of a piece is the `@name` at the end of an extension folder; otherwise it is whoever first committed it. To add a new person, add one line to `tools/authors.txt`. To correct a wrong owner, add a line to `tools/owners-override.txt`.
+
 Things you add yourself (deliberately not in the repo):
 - **Wallpaper**: set your own in Settings → Appearance
 - **Ambient mode video**: a looping video at `~/Ambient/wallpaper.mp4`

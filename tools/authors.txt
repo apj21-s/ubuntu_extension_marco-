@@ -1,0 +1,6 @@
+# Who is who. Maps git commit authors (name or email) to the short name used in
+# FEATURES.md and in ./install.sh --only / --skip.
+#   short-name: git-name-or-email, another-name-or-email, ...
+# A new contributor who is not listed here shows up under their git name (lowercased).
+arco: apj21-s, 237396096+apj21-s@users.noreply.github.com
+sagar: Sagarjha7174, 151744280+Sagarjha7174@users.noreply.github.com

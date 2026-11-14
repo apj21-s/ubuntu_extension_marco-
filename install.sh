@@ -4,6 +4,10 @@
 #   ./install.sh             everything: user part, then the system part (password popup)
 #   ./install.sh --user      user part only
 #   ./install.sh --dry-run   only print what would be done, change nothing
+#   ./install.sh --list      show who made which feature (FEATURES.md has the details)
+#   ./install.sh --only arco only features made by arco (comma list: --only arco,sagar)
+#   ./install.sh --skip sagar everything except sagar's features
+# The shared base (themes, sounds, desktop settings, packages, apps) is always installed.
 #
 # Made for Ubuntu 26.04 / GNOME Shell 50 (Wayland). Run as your normal user, not root.
 # Everything it replaces is backed up first to ~/.ubuntu_extension_marco-backup-<date>/.
@@ -11,14 +15,25 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-DRY=0; USER_ONLY=0
-for a in "$@"; do
+DRY=0; USER_ONLY=0; LIST=0
+. "$REPO/tools/owners.sh"
+parse_owner_args "$@"
+for a in "${REST[@]}"; do
   case "$a" in
     --dry-run) DRY=1 ;;
     --user) USER_ONLY=1 ;;
+    --list) LIST=1 ;;
     *) echo "Unknown option: $a"; exit 2 ;;
   esac
 done
+if [ $LIST = 1 ]; then
+  awk -F'\t' '!/^#/ && $2!="system-step" {f[$1]=f[$1] (index(" " f[$1] " ", " " $4 " ") ? "" : " " $4)}
+    !/^#/ && $2=="system-step" {s[$1]++}
+    END {for (o in f) {print o ":"; print "  features:" f[o]; if (s[o]) print "  system steps: " s[o]; print ""}}' \
+    "$FEATURES_TSV"
+  echo "Details: FEATURES.md   Install a subset: ./install.sh --only <name>  or  --skip <name>"
+  exit 0
+fi
 [ "$(id -u)" != 0 ] || { echo "Run this as your normal user (not with sudo)."; exit 1; }
 
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -66,6 +81,13 @@ if [ "${ver:-0}" != 50 ] && [ "${ver:-0}" != 51 ]; then
   if [ $DRY = 0 ]; then read -r -p "Continue anyway? [y/N] " a; [ "$a" = y ] || exit 1; fi
 fi
 [ $DRY = 1 ] && echo "DRY RUN: nothing will be changed."
+[ -n "$ONLY$SKIP" ] && echo "Owner filter: only=${ONLY:-all} skip=${SKIP:-none} (shared base always installed)"
+# put_if KIND REPO_PATH DEST [MODE]: install one owned piece if the owner filter keeps it.
+put_if() {
+  if ! wanted "$1" "$2"; then echo "   skipped ${2} (made by $(owner_of "$1" "$2"))"; return 0; fi
+  if [ $# = 4 ]; then put_rendered "$REPO/$2" "$3" "$4"; else put "$REPO/$2" "$3"; fi
+}
+SKIPPED_EXT=()
 
 step "Private answers (kept only in ${LOCAL_CONF/#$HOME/~}, never in the repo)"
 if [ -z "$VPN_NAME" ] && [ $DRY = 0 ]; then
@@ -84,7 +106,10 @@ fi
 
 step "GNOME extensions"
 for d in "$REPO"/extensions/custom/*/ "$REPO"/extensions/third-party/*/; do
-  put "${d%/}" "$HOME/.local/share/gnome-shell/extensions/$(basename "$d")"
+  rel=${d#"$REPO"/}; rel=${rel%/}
+  kind=extension; [[ $rel == extensions/third-party/* ]] && kind=third-party
+  wanted $kind "$rel" || SKIPPED_EXT+=("$(basename "$rel")")
+  put_if $kind "$rel" "$HOME/.local/share/gnome-shell/extensions/$(basename "$rel")"
 done
 
 # extensions with their own settings (e.g. Pop-out's shortcut) need their schemas compiled
@@ -93,32 +118,45 @@ for s in "$HOME"/.local/share/gnome-shell/extensions/*/schemas; do
 done
 
 step "Scripts (~/.local/bin)"
-for f in "$REPO"/bin/*; do put_rendered "$f" "$HOME/.local/bin/$(basename "$f")" 755; done
+for f in "$REPO"/bin/*; do
+  [ -f "$f" ] || continue
+  put_if script "bin/$(basename "$f")" "$HOME/.local/bin/$(basename "$f")" 755
+done
 
 step "Files right-click scripts (Send to phone)"
-for f in "$REPO"/config/nautilus-scripts/*; do put "$f" "$HOME/.local/share/nautilus/scripts/$(basename "$f")"; done
+for f in "$REPO"/config/nautilus-scripts/*; do
+  put_if files-menu "config/nautilus-scripts/$(basename "$f")" "$HOME/.local/share/nautilus/scripts/$(basename "$f")"
+done
 
 step "App launchers and default apps"
-for f in "$REPO"/applications/*.desktop; do put_rendered "$f" "$HOME/.local/share/applications/$(basename "$f")" 644; done
+for f in "$REPO"/applications/*.desktop; do
+  put_if launcher "applications/$(basename "$f")" "$HOME/.local/share/applications/$(basename "$f")" 644
+done
 put "$REPO/config/mime/mimeapps.list" "$HOME/.config/mimeapps.list"
 
 step "Background services"
-for f in "$REPO"/systemd/user/*; do put "$f" "$HOME/.config/systemd/user/$(basename "$f")"; done
+for f in "$REPO"/systemd/user/*; do
+  put_if service "systemd/user/$(basename "$f")" "$HOME/.config/systemd/user/$(basename "$f")"
+done
 run systemctl --user daemon-reload
-run systemctl --user enable fix-audio-login.service headphone-magic.service organize-downloads.path \
+for u in fix-audio-login.service headphone-magic.service organize-downloads.path \
   organize-downloads.timer power-auto.service session-keeper-restore.service \
-  session-keeper-save.timer weekly-tidy.timer
+  session-keeper-save.timer weekly-tidy.timer; do
+  wanted service "systemd/user/$u" && run systemctl --user enable "$u"
+done
 # File indexing off (saves CPU and battery).
 run systemctl --user mask localsearch-3.service localsearch-control-3.service \
   tracker-miner-fs-3.service tracker-miner-fs-control-3.service
 
 step "Startup items"
-put "$REPO/autostart/login-sound.desktop" "$HOME/.config/autostart/login-sound.desktop"
-put_rendered "$REPO/autostart/file-finder.desktop" "$HOME/.config/autostart/file-finder.desktop" 644
-for f in "$REPO"/autostart/disabled/*.desktop; do put "$f" "$HOME/.config/autostart/$(basename "$f")"; done
+put_if startup autostart/login-sound.desktop "$HOME/.config/autostart/login-sound.desktop"
+put_if startup autostart/file-finder.desktop "$HOME/.config/autostart/file-finder.desktop" 644
+for f in "$REPO"/autostart/disabled/*.desktop; do
+  put_if startup "autostart/disabled/$(basename "$f")" "$HOME/.config/autostart/$(basename "$f")"
+done
 
 step "Ambient mode (Alt+Q)"
-for f in "$REPO"/ambient/*; do put_rendered "$f" "$HOME/Ambient/$(basename "$f")" 755; done
+for f in "$REPO"/ambient/*; do put_if ambient "ambient/$(basename "$f")" "$HOME/Ambient/$(basename "$f")" 755; done
 [ -f "$HOME/Ambient/wallpaper.mp4" ] || echo "   Add your own looping video at ~/Ambient/wallpaper.mp4 to use Ambient mode."
 
 step "Cursor, sounds, terminal palette, welcome screen, window effects"
@@ -152,7 +190,13 @@ step "Desktop settings (theme, dock, shortcuts, extensions, app folders, keyboar
 if [ $DRY = 1 ]; then
   echo "   would load $(grep -c '^\[' "$REPO/config/dconf/settings.ini") settings groups into dconf"
 else
-  render "$REPO/config/dconf/settings.ini" | dconf load /
+  # Leave skipped extensions out of the enabled list.
+  sk=(-e '')
+  for e in "${SKIPPED_EXT[@]}"; do
+    q="'${e//./\\.}'"
+    sk+=(-e "/^enabled-extensions=/{s/, $q//g;s/$q, //g;s/\\[$q\\]/@as []/g}")
+  done
+  render "$REPO/config/dconf/settings.ini" | sed "${sk[@]}" | dconf load /
 fi
 
 step "Your tools: Telegram, uv (Python), Rust, Claude Code"
@@ -184,10 +228,11 @@ if [ $USER_ONLY = 0 ]; then
   echo "The system part installs the apps, packages and root helpers (memory tuning, hotspot"
   echo "guard, weekly cleanup, kdump off, rounded blur). It needs your password."
   if ask "Run the system part now?"; then
-    if command -v pkexec >/dev/null; then pkexec bash "$REPO/system/install-system.sh" "$USER"
-    else sudo bash "$REPO/system/install-system.sh" "$USER"; fi
+    mapfile -t OA < <(owner_args)
+    if command -v pkexec >/dev/null; then pkexec bash "$REPO/system/install-system.sh" "$USER" "${OA[@]}"
+    else sudo bash "$REPO/system/install-system.sh" "$USER" "${OA[@]}"; fi
   else
-    echo "Later: sudo bash $REPO/system/install-system.sh $USER"
+    echo "Later: sudo bash $REPO/system/install-system.sh $USER $(owner_args | tr '\n' ' ')"
   fi
 fi
 

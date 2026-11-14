@@ -1,3 +1,6 @@
 #!/bin/bash
-# Refuse any commit that would publish something private (see tools/check-leaks.py).
-exec python3 -I "$(git rev-parse --show-toplevel)/tools/check-leaks.py" --staged
+# 1. Refuse any commit that would publish something private (see tools/check-leaks.py).
+# 2. Refresh the who-made-what list (FEATURES.md, features.tsv) and add it to the commit.
+top="$(git rev-parse --show-toplevel)"
+python3 -I "$top/tools/check-leaks.py" --staged || exit 1
+python3 -I "$top/tools/features.py" >/dev/null && git -C "$top" add FEATURES.md features.tsv
