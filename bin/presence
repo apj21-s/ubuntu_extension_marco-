@@ -1,0 +1,319 @@
+#!/usr/bin/python3 -I
+"""Presence: dims and blanks the screen soon after you leave, but keeps it on while you
+are reading. No camera, no polling: it only wakes up on events.
+
+  presence             run the daemon (the presence.service user unit does this)
+  presence on|off      start/stop it now and at every login
+  presence status      prints "active" or "inactive"
+  presence why         shows what it has learned (your reading rhythm, extra time per hour)
+
+How it decides how long to wait before dimming (the "away timeout", 90 s by default):
+  * Reading rhythm: every pause in your input longer than 8 s is remembered. If your
+    recent pauses are steady (scroll, read, scroll...), the timeout grows to 2.5x your
+    usual pause, so the screen never dims in the middle of a page.
+  * Headphones: Bluetooth headphones connected while something plays -> timeout doubles
+    (you are listening nearby). Headphones disconnecting while you are idle -> you
+    probably walked off: dim right away. (headphone-magic already pauses the music.)
+  * Other apps: a video, a call, anything keeping the screen awake -> presence does nothing.
+  * Learning: if you wake the screen within 5 s of a dim, that hour of the day gets 60 s
+    more next time (it slowly gives the time back when dims are not cancelled).
+After the timeout the screen dims to 30 %; 30 s later it blanks. Any input restores it.
+"""
+import json
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+from gi.repository import Gio, GLib
+
+PAUSE_MS = 8_000           # a pause in input this long starts an "idle period"
+BASE_AWAY_S = 90           # default wait before dimming
+MAX_AWAY_S = 600
+READ_FACTOR = 2.5          # reading: wait 2.5x your usual pause
+READ_MIN_PAUSES = 3        # this many recent pauses needed to call it a rhythm
+RECENT_S = 15 * 60         # pauses older than this are forgotten
+BLANK_AFTER_DIM_S = 30
+DIM_TO = 0.30
+CANCEL_WINDOW_S = 5        # waking this soon after a dim = "I was still here"
+LEARN_STEP_S, LEARN_MAX_S, LEARN_DECAY_S = 60, 600, 10
+GNOME_IDLE_S = 300         # GNOME's own blank (idle-delay); held off if we want longer
+
+UNIT = "presence.service"
+STATE_DIR = os.path.join(GLib.get_user_state_dir(), "presence")
+LEARN = os.path.join(STATE_DIR, "learn.json")
+SAVED = os.path.join(GLib.get_user_runtime_dir(), "presence-brightness")
+DRY_RUN = os.environ.get("PRESENCE_DRY_RUN") == "1"
+if DRY_RUN:  # test: short timers, log decisions, change nothing
+    PAUSE_MS, BASE_AWAY_S, BLANK_AFTER_DIM_S = 2_000, 6, 4
+IDLE_INHIBIT = 8
+MON = ("org.gnome.Mutter.IdleMonitor", "/org/gnome/Mutter/IdleMonitor/Core", "org.gnome.Mutter.IdleMonitor")
+SM = ("org.gnome.SessionManager", "/org/gnome/SessionManager", "org.gnome.SessionManager")
+
+
+def log(msg):
+    print(f"presence: {msg}", flush=True)
+
+
+class Presence:
+    def __init__(self):
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.sysbus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.pauses = []          # (end time, length s) of recent idle periods
+        self.idle_since = None    # monotonic time the current idle period began
+        self.active_id = 0
+        self.timers = []
+        self.cookie = 0
+        self.dimmed_at = None
+        self.learn = self._load_learn()
+        self.restore_brightness()  # left dimmed by a crash? put it back
+
+        self.bus.signal_subscribe(MON[0], MON[2], "WatchFired", MON[1], None,
+                                  Gio.DBusSignalFlags.NONE, self.on_watch)
+        self.idle_id = self.call(*MON, "AddIdleWatch", GLib.Variant("(t)", (PAUSE_MS,)))[0]
+        # Bluetooth headphones connecting/disconnecting (system bus, event only)
+        self.sysbus.signal_subscribe("org.bluez", "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                     None, "org.bluez.Device1", Gio.DBusSignalFlags.NONE, self.on_bluez)
+
+    # ---------- D-Bus ----------
+    def call(self, dest, path, iface, method, args=None, bus=None):
+        try:
+            res = (bus or self.bus).call_sync(dest, path, iface, method, args, None,
+                                              Gio.DBusCallFlags.NONE, 3000, None)
+            return res.unpack() if res else ()
+        except GLib.Error as e:
+            log(f"{method} failed: {e.message}")
+            return None
+
+    def others_keep_awake(self):
+        r = self.call(*SM, "IsInhibited", GLib.Variant("(u)", (IDLE_INHIBIT,)))
+        return bool(r and r[0]) and not self.cookie
+
+    def playing(self):
+        names = self.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames")
+        for name in (names[0] if names else []):
+            if not name.startswith("org.mpris.MediaPlayer2."):
+                continue
+            r = self.call(name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties", "Get",
+                          GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", "PlaybackStatus")))
+            if r and r[0] == "Playing":
+                return True
+        return False
+
+    def headphones(self):
+        r = self.call("org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                      bus=self.sysbus)
+        for ifaces in (r[0] if r else {}).values():
+            dev = ifaces.get("org.bluez.Device1")
+            if dev and dev.get("Connected") and str(dev.get("Icon", "")).startswith("audio-"):
+                return True
+        return False
+
+    # ---------- learning ----------
+    def _load_learn(self):
+        try:
+            with open(LEARN) as f:
+                return {int(k): int(v) for k, v in json.load(f).items()}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_learn(self):
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = LEARN + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.learn, f)
+        os.replace(tmp, LEARN)
+
+    def _nudge(self, delta):
+        h = time.localtime().tm_hour
+        self.learn[h] = max(0, min(LEARN_MAX_S, self.learn.get(h, 0) + delta))
+        self._save_learn()
+
+    # ---------- the decision ----------
+    def reading_pause(self):
+        now = time.monotonic()
+        self.pauses = [(t, s) for t, s in self.pauses if now - t < RECENT_S]
+        recent = [s for _t, s in self.pauses if s < MAX_AWAY_S]
+        if len(recent) < READ_MIN_PAUSES:
+            return None
+        med = statistics.median(recent[-8:])
+        spread = statistics.pstdev(recent[-8:])
+        return med if spread <= med * 0.8 else None  # steady enough to be a rhythm
+
+    def away_after(self):
+        wait = BASE_AWAY_S
+        why = ["base"]
+        rp = self.reading_pause()
+        if rp:
+            wait = max(wait, READ_FACTOR * rp)
+            why.append(f"reading (pause ~{rp:.0f}s)")
+        if self.headphones() and self.playing():
+            wait *= 2
+            why.append("listening on headphones")
+        extra = self.learn.get(time.localtime().tm_hour, 0)
+        if extra:
+            wait += extra
+            why.append(f"learned +{extra}s")
+        return min(MAX_AWAY_S, wait), ", ".join(why)
+
+    # ---------- actions ----------
+    def hold(self):
+        if DRY_RUN:
+            log("would hold the screen on")
+        elif not self.cookie:
+            r = self.call(*SM, "Inhibit", GLib.Variant("(susu)", ("presence", 0, "You are reading", IDLE_INHIBIT)))
+            self.cookie = r[0] if r else 0
+
+    def release(self):
+        if self.cookie:
+            self.call(*SM, "Uninhibit", GLib.Variant("(u)", (self.cookie,)))
+            self.cookie = 0
+
+    def _brightness(self, value=None):
+        props = ("org.gnome.SettingsDaemon.Power", "/org/gnome/SettingsDaemon/Power", "org.freedesktop.DBus.Properties")
+        if value is None:
+            r = self.call(*props, "Get", GLib.Variant("(ss)", ("org.gnome.SettingsDaemon.Power.Screen", "Brightness")))
+            return int(r[0]) if r else -1
+        self.call(*props, "Set", GLib.Variant("(ssv)", ("org.gnome.SettingsDaemon.Power.Screen", "Brightness",
+                                                        GLib.Variant("i", int(value)))))
+
+    def dim(self, reason):
+        if self.dimmed_at is not None:
+            return
+        self.release()
+        self.dimmed_at = time.monotonic()
+        log(f"away ({reason}): dim")
+        if not DRY_RUN and not os.path.exists(SAVED):
+            b = self._brightness()
+            if b > 0:
+                with open(SAVED, "w") as f:
+                    f.write(str(b))
+                self._brightness(max(3, round(b * DIM_TO)))
+        self.later(BLANK_AFTER_DIM_S, self.blank)
+
+    def blank(self):
+        log("blank" if not DRY_RUN else "would blank")
+        if not DRY_RUN:
+            self.call("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver", "org.gnome.ScreenSaver",
+                      "SetActive", GLib.Variant("(b)", (True,)))
+
+    def restore_brightness(self):
+        try:
+            with open(SAVED) as f:
+                b = int(f.read().strip())
+        except (OSError, ValueError):
+            return
+        os.unlink(SAVED)
+        self._brightness(b)
+
+    # ---------- timers ----------
+    def later(self, seconds, fn):
+        def run():
+            self.timers = [t for t in self.timers if t != tid]
+            fn()
+            return GLib.SOURCE_REMOVE
+        tid = GLib.timeout_add(int(seconds * 1000), run)
+        self.timers.append(tid)
+
+    def clear_timers(self):
+        for t in self.timers:
+            GLib.source_remove(t)
+        self.timers = []
+
+    # ---------- events ----------
+    def on_watch(self, _c, _s, _p, _i, _sig, params):
+        wid = params.unpack()[0]
+        if wid == self.idle_id:
+            self.idle_since = time.monotonic() - PAUSE_MS / 1000
+            r = self.call(*MON, "AddUserActiveWatch")
+            self.active_id = r[0] if r else 0
+            self.on_idle()
+        elif wid == self.active_id:
+            self.active_id = 0
+            self.on_active()
+
+    def on_idle(self):
+        if self.others_keep_awake():
+            return
+        wait, why = self.away_after()
+        elapsed = PAUSE_MS / 1000
+        if DRY_RUN:
+            log(f"idle: dim in {wait:.0f}s ({why})")
+        if wait > GNOME_IDLE_S - 20:
+            self.hold()  # GNOME would blank first: hold it off until our own time
+        self.later(max(1, wait - elapsed), lambda: self.dim(why))
+
+    def on_active(self):
+        now = time.monotonic()
+        self.clear_timers()
+        self.release()
+        if self.dimmed_at is not None:
+            if now - self.dimmed_at <= CANCEL_WINDOW_S:
+                self._nudge(LEARN_STEP_S)  # dimmed too early
+                log("woken right after dim: learning +60s for this hour")
+            else:
+                self._nudge(-LEARN_DECAY_S)
+            self.dimmed_at = None
+            if not DRY_RUN:
+                self.restore_brightness()
+        elif self.idle_since is not None:
+            self.pauses.append((now, now - self.idle_since))
+        self.idle_since = None
+
+    def on_bluez(self, _c, _s, _path, _i, _sig, params):
+        iface, changed, _inv = params.unpack()
+        if changed.get("Connected") is False and self.active_id and self.dimmed_at is None:
+            # headphones (or any audio device) dropped while you are idle: you walked off
+            self.clear_timers()
+            self.dim("headphones disconnected")
+
+    def stop(self):
+        self.clear_timers()
+        self.release()
+        self.restore_brightness()
+
+
+def control(cmd):
+    if cmd == "status":
+        r = subprocess.run(["systemctl", "--user", "is-active", UNIT], capture_output=True, text=True)
+        on = r.stdout.strip() == "active"
+        print("active" if on else "inactive")
+        return 0 if on else 1
+    elif cmd == "on":
+        subprocess.run(["systemctl", "--user", "enable", "--now", UNIT], check=False)
+    elif cmd == "off":
+        subprocess.run(["systemctl", "--user", "disable", "--now", UNIT], check=False)
+    elif cmd == "why":
+        try:
+            with open(LEARN) as f:
+                learned = json.load(f)
+        except (OSError, ValueError):
+            learned = {}
+        extra = {f"{int(h):02d}:00": f"+{s}s" for h, s in sorted(learned.items(), key=lambda x: int(x[0])) if s}
+        print("Learned extra time before dimming:", extra or "none yet")
+    else:
+        print("Usage: presence [on|off|status|why]")
+        return 2
+    return 0
+
+
+def main():
+    if len(sys.argv) > 1:
+        return control(sys.argv[1])
+    app = Presence()
+    loop = GLib.MainLoop()
+    try:
+        from gi.repository import GLibUnix
+        add_signal = GLibUnix.signal_add
+    except ImportError:
+        add_signal = GLib.unix_signal_add
+    for sig in (15, 2):
+        add_signal(GLib.PRIORITY_HIGH, sig, lambda: (app.stop(), loop.quit(), False)[2])
+    log("running" + (" (dry run)" if DRY_RUN else ""))
+    loop.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

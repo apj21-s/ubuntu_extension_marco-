@@ -125,8 +125,9 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 |---|---|
 | `power-auto` | Power Saver on battery, Balanced on charger; on battery it also turns off the music pill's live visualizer |
 | `headphone-magic` | Pauses music when headphones are unplugged and resumes it when they're plugged back in (wired and Bluetooth) |
+| `presence` | Dims the screen soon after you leave but keeps it on while you read: learns your reading rhythm, notices Bluetooth headphones, and learns when a dim was too early. No camera. `presence on/off/status/why`; Quick Settings toggle "Presence" |
 | `organize-downloads` | Sorts new downloads into folders (PDFs, Images, Documents…); old installers go to the Trash after 30 days |
-| `session-keeper` | Remembers open apps, folders and terminal tabs, and offers once at login to reopen them after a restart |
+| `session-keeper` | Remembers open apps, folders and terminal tabs, and offers once at login to reopen them after a restart or after logging out and back in |
 | `fix-audio` | Restarts the sound system if it breaks, and checks at login |
 | `fix-touchpad` | Reloads the touchpad when multi-finger gestures, scrolling or tap stop working (Super+F5 Refresh does it too, and it runs by itself after waking from sleep) |
 | `refresh` / `refresh-flash` | Windows-style refresh with a health report |
@@ -148,7 +149,7 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `fake-mode` | Turn Fake Airplane on or off |
 
 ### Background services (`systemd/user/`)
-`power-auto`, `headphone-magic`, `fix-audio-login`, `organize-downloads` (path + daily timer), `session-keeper` (save every 2 min + restore at login), `weekly-tidy` (Sundays) and `ambient` (idle monitor, off by default). File indexing (localsearch/tracker) is switched off.
+`power-auto`, `headphone-magic`, `fix-audio-login`, `organize-downloads` (path + daily timer), `session-keeper` (save every 2 min + restore at login), `weekly-tidy` (Sundays), `presence` (smart dim when you leave) and `ambient` (idle monitor, off by default). File indexing (localsearch/tracker) is switched off.
 
 ### Look
 - **Cursor**: `IFoundYou-Premium`, obsidian with crimson accents. The shapes come from [Bibata Modern](https://github.com/ful1e5/Bibata_Cursor) (GPL-3.0). `IFoundYou-cursor` is a simpler generated version (`tools/make_cursor.py`).

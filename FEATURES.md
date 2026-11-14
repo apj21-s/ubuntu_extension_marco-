@@ -16,7 +16,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 
 | Owner | Features |
 |---|---|
-| arco | 36 features, 18 third-party extensions, 9 system steps |
+| arco | 37 features, 18 third-party extensions, 9 system steps |
 | sagar | 16 features, 1 third-party extensions, 6 system steps |
 
 ## arco
@@ -45,6 +45,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 | **phone-float** | While you drag a file or text from any app, a phone floats in at the right edge; drop on it to send it to your phone with Phone Drop. Runs ~/.local/bin/phone-float. | `extensions/custom/phone-float@arco`<br>`bin/phone-float` |
 | **popout** | Picture-in-picture for any window: Super+P floats a live mini copy of the focused window above everything. Drag it to move it (it snaps to a corner), scroll to resize, double-click to go back to the window. Super+P again closes it. | `extensions/custom/popout@arco` |
 | **power-auto** | Battery-smart power mode: Power Saver on battery, Balanced on charger | `bin/power-auto`<br>`systemd/user/power-auto.service` |
+| **presence** | Presence: dims and blanks the screen soon after you leave, but keeps it on while you | `bin/presence`<br>`systemd/user/presence.service` |
 | **protonvpn-slow** | Same as "protonvpn", but waits up to 45 s for a connection instead of 10 s | `bin/protonvpn-slow` |
 | **quiet-startup** | Turns off start-up items that aren't needed (Orca, Evolution alarms, Geoclue demo, file indexing, Ubuntu Pro/report pop-ups, SPICE agent) | `autostart/disabled/geoclue-demo-agent.desktop`<br>`autostart/disabled/localsearch-3.desktop`<br>`autostart/disabled/orca-autostart.desktop`<br>`autostart/disabled/org.gnome.Evolution-alarm-notify.desktop`<br>`autostart/disabled/spice-vdagent.desktop`<br>`autostart/disabled/ubuntu-advantage-notification.desktop`<br>`autostart/disabled/ubuntu-report-on-upgrade.desktop` |
 | **refresh** | Windows-style Refresh: quick flash + light checks that keep things running smoothly | `bin/refresh`<br>`applications/refresh.desktop` |

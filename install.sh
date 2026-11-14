@@ -141,7 +141,7 @@ done
 run systemctl --user daemon-reload
 for u in fix-audio-login.service headphone-magic.service organize-downloads.path \
   organize-downloads.timer power-auto.service session-keeper-restore.service \
-  session-keeper-save.timer weekly-tidy.timer; do
+  session-keeper-save.timer weekly-tidy.timer presence.service; do
   wanted service "systemd/user/$u" && run systemctl --user enable "$u"
 done
 # File indexing off (saves CPU and battery).

@@ -30,6 +30,24 @@ def boot_id():
     return open("/proc/sys/kernel/random/boot_id").read().strip()
 
 
+def login_id():
+    """The current graphical login (logind session id), or "" when nobody is logged in
+    to the desktop. A new value means you logged out and back in."""
+    try:
+        r = subprocess.run(["loginctl", "show-user", str(os.getuid()), "-p", "Display", "--value"],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def from_earlier(snap):
+    """True if this snapshot was taken before the last restart or the last log out."""
+    if snap.get("boot_id") != boot_id():
+        return True
+    return "login" in snap and snap["login"] != login_id()
+
+
 def desktop_path(app_id):
     for d in APP_DIRS:
         p = os.path.join(d, app_id + ".desktop")
@@ -105,7 +123,7 @@ def collect():
                 folders.append(uris[0])
     except Exception:
         pass
-    return {"boot_id": boot_id(), "time": int(time.time()),
+    return {"boot_id": boot_id(), "login": login_id(), "time": int(time.time()),
             "apps": apps, "folders": folders, "terminals": terminals}
 
 
@@ -118,9 +136,11 @@ def load(path):
 
 def save():
     os.makedirs(STATE, exist_ok=True)
+    if not login_id():
+        return  # logged out: nothing to save, and don't disturb the last snapshot
     old = load(CURRENT)
-    # First save after a restart: keep the old session for restoring.
-    if old and old.get("boot_id") != boot_id():
+    # First save after a restart or a new login: keep the old session for restoring.
+    if old and from_earlier(old):
         os.replace(CURRENT, PREVIOUS)
     snap = collect()
     if not (snap["apps"] or snap["folders"] or snap["terminals"]):
@@ -132,7 +152,7 @@ def save():
 
 def last_session():
     cur = load(CURRENT)
-    if cur and cur.get("boot_id") != boot_id():
+    if cur and from_earlier(cur):
         return cur
     return load(PREVIOUS)
 
@@ -213,6 +233,9 @@ def restore(ask):
         lines.append("✖ Didn't open: " + ", ".join(failed))
     if not lines:
         lines.append("Everything from last time was already open.")
+    if ask:
+        # You just clicked Restore: show the result even in Do Not Disturb.
+        os.environ["NOTIFY_URGENT"] = "1"
     notify("Session restored 🛠" if not failed else "Session restored 🛠 - some apps failed",
            "\n".join(lines))
 
