@@ -93,6 +93,7 @@ arco	script	bin/weekly-tidy	weekly-tidy
 arco	service	systemd/user/weekly-tidy.service	weekly-tidy
 arco	service	systemd/user/weekly-tidy.timer	weekly-tidy
 arco	script	bin/welcome	welcome
+arco	extension	extensions/custom/window-memory@arco	window-memory
 sagar	extension	extensions/custom/auto-dnd@sagar	auto-dnd
 sagar	sudo-rule	system/sudoers/battery-cap	battery-cap
 sagar	extension	extensions/custom/drag-switch@sagar	drag-switch

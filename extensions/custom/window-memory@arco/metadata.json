@@ -1,0 +1,7 @@
+{
+  "uuid": "window-memory@arco",
+  "name": "Window Memory",
+  "description": "Remembers where each app's windows were (position, size, workspace, maximized) and puts them back when the apps reopen right after login or a session restore. Saves only when windows change.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

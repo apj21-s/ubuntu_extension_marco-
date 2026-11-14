@@ -128,6 +128,7 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 | `presence` | Dims the screen soon after you leave but keeps it on while you read: learns your reading rhythm, notices Bluetooth headphones, and learns when a dim was too early. No camera. `presence on/off/status/why`; Quick Settings toggle "Presence" |
 | `organize-downloads` | Sorts new downloads into folders (PDFs, Images, Documents…); old installers go to the Trash after 30 days |
 | `session-keeper` | Remembers open apps, folders and terminal tabs, and offers once at login to reopen them after a restart or after logging out and back in |
+| `window-memory@arco` | Puts reopened windows back where they were (position, size, workspace, maximized) after login or a session restore. Saves only when windows change |
 | `fix-audio` | Restarts the sound system if it breaks, and checks at login |
 | `fix-touchpad` | Reloads the touchpad when multi-finger gestures, scrolling or tap stop working (Super+F5 Refresh does it too, and it runs by itself after waking from sleep) |
 | `refresh` / `refresh-flash` | Windows-style refresh with a health report |

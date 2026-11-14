@@ -16,7 +16,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 
 | Owner | Features |
 |---|---|
-| arco | 37 features, 18 third-party extensions, 9 system steps |
+| arco | 38 features, 18 third-party extensions, 9 system steps |
 | sagar | 16 features, 1 third-party extensions, 6 system steps |
 
 ## arco
@@ -60,6 +60,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 | **wallpaper-mood** | Recolours the desktop's custom extensions (badges, click ripple, charging ring, hotspot and screenshot cards, drag bar) to the wallpaper's accent colour, live. The colours come from ~/.local/bin/wallpaper-mood. | `extensions/custom/wallpaper-mood@arco`<br>`bin/wallpaper-mood` |
 | **weekly-tidy** | Weekly personal tidy + short report (runs as you, after the system tidy) | `bin/weekly-tidy`<br>`systemd/user/weekly-tidy.service`<br>`systemd/user/weekly-tidy.timer` |
 | **welcome** | Terminal welcome screen — "I Found You" style (dark, warm text, one neon red accent) | `bin/welcome` |
+| **window-memory** | Remembers where each app's windows were (position, size, workspace, maximized) and puts them back when the apps reopen right after login or a session restore. Saves only when windows change. | `extensions/custom/window-memory@arco` |
 
 Third-party extensions added (made by others, chosen by arco):
 
