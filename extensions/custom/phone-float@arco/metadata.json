@@ -1,0 +1,7 @@
+{
+  "uuid": "phone-float@arco",
+  "name": "Phone Float",
+  "description": "While you drag a file or text from any app, a phone floats in at the right edge; drop on it to send it to your phone with Phone Drop. Runs ~/.local/bin/phone-float.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""Phone Float - a phone that floats in while you drag something.
+
+Start dragging a file (or text) from any app and a small phone floats in at the right
+edge of the screen. Drop on it and the file goes to your phone through Phone Drop
+(~/.local/bin/phone-drop opens with it, ready to scan). Drop anywhere else and the phone
+sinks away again.
+
+The window is always there but fully transparent and click-through while idle (empty
+input region), so showing it mid-drag never steals focus. The phone-float@arco GNOME
+extension places it, keeps it on top, and calls the "show" / "hide" actions when a drag
+starts or ends. Nothing is drawn or animated while idle.
+"""
+import math
+import os
+import time
+import uuid
+
+os.environ.setdefault("GSK_RENDERER", "cairo")  # small window: software drawing is plenty
+
+import cairo  # noqa: E402
+import gi  # noqa: E402
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
+
+APP_ID = "io.arco.PhoneFloat"
+WIN_W, WIN_H = 220, 300          # room around the phone for its shadow and the slide
+PH_W, PH_H, PH_R = 92, 168, 18   # the phone body
+TEXT_W = 78                      # captions wrap within this width
+PHONE_DROP = os.path.join(os.path.expanduser("~"), ".local", "bin", "phone-drop")
+
+IN_MS, OUT_MS = 260, 200
+SINK_AFTER_CHECK_MS = 600
+# drop sequence (ms from the drop): thumbnail falls in, rim sweep, check
+DROP_FALL, DROP_SWEEP, DROP_CHECK = 260, 620, 300
+
+CRIMSON = (0.816, 0.376, 0.416)   # #d0606a
+DEEP = (0.694, 0.267, 0.302)      # #b1444d
+CREAM = (0.961, 0.933, 0.902)     # #f5eee6
+BODY = (0.078, 0.067, 0.067)      # #141111
+
+CSS = b"window.phonefloat, window.phonefloat > * { background: transparent; box-shadow: none; }"
+
+
+def ease_out_cubic(t):
+    return 1 - (1 - t) ** 3
+
+
+def ease_out_back(t, s=1.6):
+    t -= 1
+    return t * t * ((s + 1) * t + s) + 1
+
+
+def clamp(v, lo=0.0, hi=1.0):
+    return lo if v < lo else hi if v > hi else v
+
+
+def rounded_rect(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def animations_on():
+    try:
+        return Gio.Settings.new("org.gnome.desktop.interface").get_boolean("enable-animations")
+    except GLib.Error:
+        return True
+
+
+class Phone(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Phone Float")
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_default_size(WIN_W, WIN_H)
+        self.add_css_class("phonefloat")
+
+        self.area = Gtk.DrawingArea(content_width=WIN_W, content_height=WIN_H)
+        self.area.set_draw_func(self._draw)
+        self.set_child(self.area)
+
+        # animation state
+        self.anim = animations_on()
+        self.vis = 0.0            # 0 hidden .. 1 shown (eased separately)
+        self.vis_from, self.vis_to, self.vis_t0, self.vis_ms = 0.0, 0.0, 0.0, 1
+        self.hover = 0.0          # follows self.hover_target smoothly
+        self.hover_target = 0.0
+        self.drop_t0 = None       # time of a drop, while its sequence plays
+        self.drop_label = ""      # "PDF", "3 files", ...
+        self.drop_thumb = None    # cairo surface of an image preview
+        self.pending = None       # (paths, text) to hand to phone-drop
+        self.sent = False
+        self.tick_id = 0
+        self.last = 0.0
+
+        drop = Gtk.DropTarget.new(GObject.TYPE_NONE, Gdk.DragAction.COPY)
+        drop.set_gtypes([Gdk.FileList, GObject.TYPE_STRING])
+        drop.connect("drop", self._on_drop)
+        self.area.add_controller(drop)
+        motion = Gtk.DropControllerMotion()
+        motion.connect("enter", lambda *_: self._hovering(True))
+        motion.connect("leave", lambda *_: self._hovering(False))
+        self.area.add_controller(motion)
+
+        self.connect("map", lambda *_: self._set_input(False))
+
+    # ---------- input region: click-through while hidden ----------
+    def _set_input(self, on):
+        surface = self.get_surface()
+        if not surface:
+            return
+        if on:
+            surface.set_input_region(cairo.Region(cairo.RectangleInt(0, 0, WIN_W, WIN_H)))
+        else:
+            surface.set_input_region(cairo.Region())
+
+    # ---------- actions from the extension ----------
+    def show_phone(self):
+        if self.drop_t0 is not None:
+            return
+        self.anim = animations_on()
+        self.sent = False
+        self._set_input(True)
+        self._animate_vis(1.0, IN_MS)
+
+    def hide_phone(self):
+        if self.drop_t0 is not None:  # the drop sequence hides it itself
+            return
+        self.hover_target = 0.0
+        self._animate_vis(0.0, OUT_MS)
+
+    def _animate_vis(self, target, ms):
+        now = time.monotonic() * 1000
+        self.vis_from, self.vis_to, self.vis_t0 = self.vis, target, now
+        self.vis_ms = ms if self.anim else 120
+        self._start_tick()
+
+    # ---------- hover ----------
+    def _hovering(self, on):
+        if self.drop_t0 is not None:
+            return
+        self.hover_target = 1.0 if on else 0.0
+        self._start_tick()
+
+    # ---------- drop ----------
+    def _on_drop(self, _target, value, _x, _y):
+        paths, text = [], None
+        if isinstance(value, Gdk.FileList):
+            paths = [f.get_path() for f in value.get_files() if f.get_path()]
+        elif isinstance(value, str):
+            lines = [l for l in value.splitlines() if l.strip()]
+            if lines and all(l.startswith("file://") for l in lines):
+                paths = [Gio.File.new_for_uri(l.strip()).get_path() for l in lines]
+                paths = [p for p in paths if p]
+            elif value.strip():
+                text = value
+        if not paths and not text:
+            return False
+        self.pending = (paths, text)
+        self._prepare_drop_visual(paths, text)
+        self.hover_target = 1.0
+        self.drop_t0 = time.monotonic() * 1000
+        self._start_tick()
+        return True
+
+    def _prepare_drop_visual(self, paths, text):
+        self.drop_thumb = None
+        if text:
+            self.drop_label = "TEXT"
+            return
+        if len(paths) > 1:
+            self.drop_label = f"{len(paths)} files"
+        else:
+            p = paths[0]
+            ext = os.path.splitext(p)[1].lstrip(".").upper()
+            self.drop_label = "FOLDER" if os.path.isdir(p) else (ext[:4] or "FILE")
+            try:
+                ctype = Gio.content_type_guess(p, None)[0] or ""
+                if ctype.startswith("image/"):
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(p, 120, 120, True)
+                    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, pb.get_width(), pb.get_height())
+                    c = cairo.Context(surf)
+                    Gdk.cairo_set_source_pixbuf(c, pb, 0, 0)
+                    c.paint()
+                    self.drop_thumb = surf
+            except (GLib.Error, TypeError):
+                self.drop_thumb = None
+
+    def _send(self):
+        if self.sent or not self.pending:
+            return
+        self.sent = True
+        paths, text = self.pending
+        argv = [PHONE_DROP] + list(paths)
+        if text:
+            tmp = os.path.join(GLib.get_user_runtime_dir(), f"phone-float-text-{uuid.uuid4().hex[:6]}")
+            with open(tmp, "w") as f:
+                f.write(text)
+            argv += ["--text", tmp]
+        try:
+            Gio.Subprocess.new(argv, Gio.SubprocessFlags.NONE)
+        except GLib.Error as e:
+            print(f"phone-float: could not start phone-drop: {e.message}")
+
+    # ---------- frame clock ----------
+    def _start_tick(self):
+        if not self.tick_id:
+            self.last = time.monotonic() * 1000
+            self.tick_id = self.area.add_tick_callback(self._tick)
+
+    def _tick(self, _w, _clock):
+        now = time.monotonic() * 1000
+        dt = min(64.0, now - self.last)
+        self.last = now
+
+        # show / hide
+        k = clamp((now - self.vis_t0) / self.vis_ms)
+        self.vis = self.vis_from + (self.vis_to - self.vis_from) * k
+
+        # hover follows its target smoothly (critically damped feel)
+        rate = 1 - math.exp(-dt / 70.0)
+        self.hover += (self.hover_target - self.hover) * rate
+
+        # drop sequence
+        if self.drop_t0 is not None:
+            d = now - self.drop_t0
+            if d >= DROP_FALL + DROP_SWEEP and not self.sent:
+                self._send()
+            end = DROP_FALL + DROP_SWEEP + DROP_CHECK + SINK_AFTER_CHECK_MS
+            if d >= end and self.vis_to != 0.0:
+                self.hover_target = 0.0
+                self.vis_from, self.vis_to, self.vis_t0 = self.vis, 0.0, now
+                self.vis_ms = OUT_MS if self.anim else 120
+            if d >= end + self.vis_ms:
+                self.drop_t0 = None
+                self.pending = None
+
+        self.area.queue_draw()
+
+        # shown and nothing moving: stop drawing until something changes
+        if (self.vis_to == 1.0 and k >= 1 and self.drop_t0 is None
+                and abs(self.hover - self.hover_target) < 0.002):
+            self.hover = self.hover_target
+            self.area.queue_draw()
+            self.tick_id = 0
+            return GLib.SOURCE_REMOVE
+
+        idle = (self.vis_to == 0.0 and self.vis <= 0.001 and self.drop_t0 is None)
+        if idle:
+            self.vis = 0.0
+            self.hover = self.hover_target = 0.0
+            self._set_input(False)
+            self.tick_id = 0
+            return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    # ---------- drawing ----------
+    # Restraint: dark glass, hairlines, one crimson accent, quiet type. No glow blobs,
+    # no bounce, no wobble. Motion is short, eased, and only says what changed.
+    def _draw(self, _area, cr, w, h):
+        if self.vis <= 0.001:
+            return
+        now = time.monotonic() * 1000
+        t = ease_out_cubic(clamp(self.vis))
+        hv = clamp(self.hover)
+        d = None if self.drop_t0 is None else now - self.drop_t0
+
+        slide = (1 - t) * 14 if self.anim else 0
+        scale = (0.97 + 0.03 * t) * (1 + 0.04 * hv) if self.anim else 1
+        cx, cy = w / 2 + slide, h / 2
+
+        cr.push_group()
+        cr.translate(cx, cy)
+        cr.scale(scale, scale)
+        x0, y0 = -PH_W / 2, -PH_H / 2
+
+        # soft contact shadow (two passes, no colour)
+        for off, a in ((10, 0.18), (4, 0.22)):
+            rounded_rect(cr, x0 + 2, y0 + off, PH_W - 4, PH_H, PH_R)
+            cr.set_source_rgba(0, 0, 0, a)
+            cr.fill()
+
+        # body: near-black glass with the faintest top light
+        rounded_rect(cr, x0, y0, PH_W, PH_H, PH_R)
+        g = cairo.LinearGradient(0, y0, 0, y0 + PH_H)
+        g.add_color_stop_rgb(0, 0.105, 0.098, 0.098)
+        g.add_color_stop_rgb(1, 0.062, 0.058, 0.058)
+        cr.set_source(g)
+        cr.fill()
+
+        # screen, with a whisper of crimson only while a file is over it
+        sx, sy, sw, sh = x0 + 4, y0 + 4, PH_W - 8, PH_H - 8
+        rounded_rect(cr, sx, sy, sw, sh, PH_R - 4)
+        cr.set_source_rgb(0.035, 0.032, 0.032)
+        cr.fill_preserve()
+        if hv > 0.01:
+            tint = cairo.LinearGradient(0, sy, 0, sy + sh)
+            tint.add_color_stop_rgba(0, *DEEP, 0.0)
+            tint.add_color_stop_rgba(1, *DEEP, 0.16 * hv)
+            cr.set_source(tint)
+            cr.fill_preserve()
+        cr.new_path()
+
+        # hairline rim: cream at rest, crimson when it's the target
+        rounded_rect(cr, x0 + 0.5, y0 + 0.5, PH_W - 1, PH_H - 1, PH_R - 0.5)
+        cr.set_source_rgba(*(CREAM[i] + (CRIMSON[i] - CREAM[i]) * hv for i in range(3)), 0.16 + 0.54 * hv)
+        cr.set_line_width(1)
+        cr.stroke()
+
+        # island
+        rounded_rect(cr, -11, y0 + 9, 22, 5, 2.5)
+        cr.set_source_rgb(0, 0, 0)
+        cr.fill()
+
+        # home bar: at rest a dim line; on a drop it fills with the accent
+        bw, by = 30, y0 + PH_H - 11
+        rounded_rect(cr, -bw / 2, by, bw, 2, 1)
+        cr.set_source_rgba(*CREAM, 0.22)
+        cr.fill()
+
+        if d is None:
+            self._caption(cr, "Release" if hv > 0.5 else "Drop to send", 0.55 + 0.35 * hv)
+        else:
+            self._draw_drop(cr, d, bw, by)
+
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(t)
+
+    def _caption(self, cr, text, alpha):
+        self._text(cr, text, 0, -6, alpha)
+
+    def _draw_drop(self, cr, d, bw, by):
+        # 1) the item settles into the centre of the screen and dims into it
+        f = ease_out_cubic(clamp(d / DROP_FALL)) if self.anim else 1
+        size = 40 * (1.25 - 0.25 * f)
+        y = -18 - 22 * (1 - f)
+        a = 0.95 - 0.35 * clamp((d - DROP_FALL) / DROP_SWEEP)
+        cr.save()
+        cr.translate(0, y)
+        rounded_rect(cr, -size / 2, -size / 2, size, size, 8)
+        if self.drop_thumb is not None:
+            cr.save()
+            cr.clip_preserve()
+            tw, th = self.drop_thumb.get_width(), self.drop_thumb.get_height()
+            k = max(size / tw, size / th)
+            cr.translate(-tw * k / 2, -th * k / 2)
+            cr.scale(k, k)
+            cr.set_source_surface(self.drop_thumb, 0, 0)
+            cr.paint_with_alpha(a * f)
+            cr.restore()
+            cr.new_path()
+        else:
+            cr.set_source_rgba(*CREAM, 0.06 * f)
+            cr.fill_preserve()
+            cr.set_source_rgba(*CREAM, 0.22 * f)
+            cr.set_line_width(1)
+            cr.stroke()
+            self._text(cr, self.drop_label, 0, -6, a * f, size=7.5, spacing=1.5)
+        cr.restore()
+
+        # 2) the home bar fills with the accent: that is the progress
+        p = ease_out_cubic(clamp((d - DROP_FALL) / DROP_SWEEP))
+        if p > 0:
+            rounded_rect(cr, -bw / 2, by, bw * p, 2, 1)
+            cr.set_source_rgba(*CRIMSON, 0.95)
+            cr.fill()
+
+        # 3) one word to finish
+        c = clamp((d - DROP_FALL - DROP_SWEEP) / DROP_CHECK)
+        self._text(cr, "Sent", 0, 22, 0.85 * c)
+
+    def _text(self, cr, text, x, y, alpha, size=8, spacing=0.6):
+        if alpha <= 0.01:
+            return
+        layout = PangoCairo.create_layout(cr)
+        fo = cairo.FontOptions()
+        fo.set_antialias(cairo.ANTIALIAS_GRAY)  # no colour fringes on the transparent window
+        PangoCairo.context_set_font_options(layout.get_context(), fo)
+        layout.context_changed()
+        layout.set_font_description(Pango.FontDescription.from_string(f"Ubuntu Sans Light {size}"))
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_letter_spacing_new(int(spacing * Pango.SCALE)))
+        layout.set_attributes(attrs)
+        layout.set_width(Pango.units_from_double(TEXT_W))
+        layout.set_alignment(Pango.Alignment.CENTER)
+        layout.set_text(text, -1)
+        cr.move_to(x - TEXT_W / 2, y)
+        cr.set_source_rgba(*CREAM, alpha)
+        PangoCairo.show_layout(cr, layout)
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        self.win = None
+
+    def do_activate(self):
+        if not self.win:
+            prov = Gtk.CssProvider()
+            prov.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov,
+                                                      Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.win = Phone(self)
+            for name, cb in (("show", self.win.show_phone), ("hide", self.win.hide_phone)):
+                a = Gio.SimpleAction.new(name, None)
+                a.connect("activate", lambda *_a, f=cb: f())
+                self.add_action(a)
+            if os.environ.get("PHONE_FLOAT_DEMO") == "1":
+                self._demo()
+        self.win.present()
+
+    def _demo(self):
+        """Test only: show, hover, a fake drop of a PDF, then hide (no phone-drop launch)."""
+        w = self.win
+        w._send = lambda: setattr(w, "sent", True)
+        at = lambda ms, fn: GLib.timeout_add(ms, lambda: (fn(), False)[1])
+        at(800, w.show_phone)
+        at(1500, lambda: w._hovering(True))
+
+        def fake_drop():
+            w.pending = (["/tmp/report.pdf"], None)
+            w.drop_label = "PDF"
+            w.drop_thumb = None
+            w.hover_target = 1.0
+            w.drop_t0 = time.monotonic() * 1000
+            w._start_tick()
+        at(2600, fake_drop)
+
+
+if __name__ == "__main__":
+    raise SystemExit(App().run(None))

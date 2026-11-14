@@ -150,6 +150,7 @@ The music pill's blur uses [gnome-rounded-blur](https://github.com/kancko/gnome-
 - **Hotspot tile** (`hotspot-devices@arco`): Android-style tile in Quick Settings (replaces the old Mobile Hotspot and Stay Awake tiles) - turn the hotspot on/off, Stay awake switch, see connected devices, Kick / Block them, Unblock blocked ones, Forget trusted ones
 - **Screenshot card** (`screenshot-card@arco`): after a screenshot a card slides in bottom-right with Save / Open / Copy / Delete; the file is only kept in ~/Pictures/Screenshots if you press Save (the image stays in the clipboard)
 - **Charging splash** (`charging-splash@arco`): plugging in sends a crimson glow up from the bottom with the battery %; unplugging gives a short dim pulse
+- **Phone Float** (`phone-float@arco` + `bin/phone-float`): while you drag a file or text from any app, a phone floats in at the right edge; drop on it to send it with Phone Drop
 - Hotspot automatically turns on Stay Awake
 - Sudo rules so `docker-toggle` and `hotspot-devices` don't ask for a password
 - Intel SOF sound fix (only applied on Intel laptops that need it)
