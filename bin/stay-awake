@@ -1,23 +1,43 @@
 #!/bin/bash
 # Stay Awake mode: stops the laptop from sleeping (idle timer or lid close)
-# so things like the mobile hotspot keep running. Usage: stay-awake on|off|status
+# so things like the mobile hotspot keep running. Usage: stay-awake on|off|status|restore
+# Logging out ends it (it is a user process), so "restore" (run at every login by
+# stay-awake-restore.service) turns it back on if you had switched it on yourself, or
+# if the hotspot is still running.
 UNIT=stay-awake
-case "$1" in
-  on)
-    systemctl --user is-active --quiet "$UNIT" && exit 0
+WANTED="$HOME/.local/state/stay-awake-wanted"   # you switched it on by hand
+MARK=/run/user/$(id -u)/stay-awake-by-hotspot   # the hotspot dispatcher switched it on
+start() {
+    systemctl --user is-active --quiet "$UNIT" && return 0
     systemd-run --user --unit="$UNIT" --description="Stay Awake mode" --quiet \
       systemd-inhibit --what=sleep:idle:handle-lid-switch --mode=block \
         --who="Stay Awake" --why="Keeping the laptop (and hotspot) running" \
       gnome-session-inhibit --inhibit suspend:idle --reason "Stay Awake mode" \
         --inhibit-only || exit 1
     sleep 1
-    systemctl --user is-active --quiet "$UNIT" || exit 1
+    systemctl --user is-active --quiet "$UNIT"
+}
+case "$1" in
+  on)
+    # called by the hotspot dispatcher (through runuser)? then it follows the hotspot;
+    # otherwise you asked for it: remember that across log outs
+    if [ "$(ps -o comm= -p $PPID 2>/dev/null)" != runuser ]; then
+      mkdir -p "$(dirname "$WANTED")" && touch "$WANTED"
+    fi
+    start || exit 1
     "$HOME/.local/bin/notify" -i weather-clear-symbolic "Stay Awake ON" "Laptop will not sleep, even with the lid closed." ;;
+  restore)
+    if [ -f "$WANTED" ]; then
+      start && "$HOME/.local/bin/notify" -i weather-clear-symbolic "Stay Awake is still on" "Turned back on after logging in."
+    elif nmcli -t -f NAME connection show --active 2>/dev/null | grep -qx Hotspot; then
+      start && touch "$MARK"
+    fi ;;
   off)
+    rm -f "$WANTED"
     systemctl --user stop "$UNIT" 2>/dev/null
     systemctl --user reset-failed "$UNIT" 2>/dev/null
     "$HOME/.local/bin/notify" -i weather-clear-night-symbolic "Stay Awake OFF" "Normal sleep settings are back." ;;
   status)
     systemctl --user is-active "$UNIT" ;;
-  *) echo "Usage: stay-awake on|off|status"; exit 2 ;;
+  *) echo "Usage: stay-awake on|off|status|restore"; exit 2 ;;
 esac

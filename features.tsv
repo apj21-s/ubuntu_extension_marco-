@@ -74,6 +74,7 @@ arco	service	systemd/user/session-keeper-restore.service	session-keeper
 arco	service	systemd/user/session-keeper-save.service	session-keeper
 arco	service	systemd/user/session-keeper-save.timer	session-keeper
 arco	script	bin/stay-awake	stay-awake
+arco	service	systemd/user/stay-awake-restore.service	stay-awake
 arco	system-step	File index for the Super+F file finder (plocate)	system
 arco	system-step	Hotspot guard (asks before new devices use your hotspot) + Stay Awake link	system
 arco	system-step	Intel SOF sound fix	system

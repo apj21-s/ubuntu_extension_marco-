@@ -54,7 +54,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 | **screen-area** | Opens GNOME's screenshot picker; prints the saved file path (empty if cancelled) | `bin/screen-area` |
 | **screenshot-card** | After a screenshot, a thumbnail card slides into the bottom-right corner with Save / Open / Copy / Delete. Screenshots are only kept in ~/Pictures/Screenshots if you press Save (the image stays in the clipboard either way). | `extensions/custom/screenshot-card@arco` |
 | **session-keeper** | Save open apps, folders and terminal tabs; reopen them after a restart | `bin/session-keeper`<br>`systemd/user/session-keeper-restore.service`<br>`systemd/user/session-keeper-save.service`<br>`systemd/user/session-keeper-save.timer` |
-| **stay-awake** | Stay Awake mode: stops the laptop from sleeping (idle timer or lid close) | `bin/stay-awake` |
+| **stay-awake** | Stay Awake mode: stops the laptop from sleeping (idle timer or lid close) | `bin/stay-awake`<br>`systemd/user/stay-awake-restore.service` |
 | **terminal-copy-on-select** | Selecting text in a terminal copies it to the clipboard automatically (Ctrl+V / Ctrl+Shift+V to paste). | `extensions/custom/terminal-copy-on-select@arco` |
 | **vpn** | VPN quick switch: vpn college / proton / off / next / status | `bin/vpn` |
 | **wallpaper-mood** | Recolours the desktop's custom extensions (badges, click ripple, charging ring, hotspot and screenshot cards, drag bar) to the wallpaper's accent colour, live. The colours come from ~/.local/bin/wallpaper-mood. | `extensions/custom/wallpaper-mood@arco`<br>`bin/wallpaper-mood` |

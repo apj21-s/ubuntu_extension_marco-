@@ -1,0 +1,12 @@
+[Unit]
+Description=Turn Stay Awake back on after logging in (if it was on)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=%h/.local/bin/stay-awake restore
+
+[Install]
+WantedBy=graphical-session.target
