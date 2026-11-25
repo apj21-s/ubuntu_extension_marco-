@@ -1,0 +1,16 @@
+[Unit]
+Description=Phone Link
+Requires=phone-link.socket
+After=phone-link.socket
+
+[Service]
+Type=dbus
+BusName=io.arco.PhoneLink
+ExecStart=%h/.local/bin/phone-link serve
+Sockets=phone-link.socket
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+MemoryHigh=150M

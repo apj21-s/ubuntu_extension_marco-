@@ -58,6 +58,13 @@ class HotspotToggle extends QuickSettings.QuickMenuToggle {
         this._awake = new PopupMenu.PopupSwitchMenuItem('Stay awake', false);
         this._awake.connect('toggled', (_i, on) => this._setAwake(on));
         this.menu.addMenuItem(this._awake);
+        // radio band: fast 5 GHz for the same room, 2.4 GHz to reach through walls
+        this._bandFast = new PopupMenu.PopupMenuItem('Fast · 5 GHz  (same room)');
+        this._bandRange = new PopupMenu.PopupMenuItem('Long range · 2.4 GHz  (through walls)');
+        this._bandFast.connect('activate', () => this._setBand('fast'));
+        this._bandRange.connect('activate', () => this._setBand('range'));
+        this.menu.addMenuItem(this._bandFast);
+        this.menu.addMenuItem(this._bandRange);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         // the device list scrolls, so a long list never runs off the screen
         this._list = new PopupMenu.PopupMenuSection();
@@ -205,6 +212,7 @@ class HotspotToggle extends QuickSettings.QuickMenuToggle {
             this._error = e.message;
         }
         this._awakeOn = await run([`${BIN}/stay-awake`, 'status']).then(() => true, () => false);
+        this._band = (await run([`${BIN}/hotspot-band`, 'status']).catch(() => '')).trim?.() || this._band;
         this._render();
         if (this.menu.isOpen)
             this._fitHeight();
@@ -219,6 +227,22 @@ class HotspotToggle extends QuickSettings.QuickMenuToggle {
         }
         this._busy = false;
         await this.refresh();
+    }
+
+    async _setBand(band) {
+        if (band === this._band)
+            return;
+        this._band = band;
+        this._showBand();
+        this.subtitle = 'Switching band…';
+        await run([`${BIN}/hotspot-band`, band]).catch(() => {});
+        await this.refresh();
+    }
+
+    _showBand() {
+        const fast = this._band === 'fast';
+        this._bandFast.setOrnament(fast ? PopupMenu.Ornament.CHECK : PopupMenu.Ornament.NONE);
+        this._bandRange.setOrnament(fast ? PopupMenu.Ornament.NONE : PopupMenu.Ornament.CHECK);
     }
 
     async _setAwake(on) {
@@ -238,6 +262,7 @@ class HotspotToggle extends QuickSettings.QuickMenuToggle {
     }
 
     _render() {
+        this._showBand();
         const s = this._state;
         this.checked = s.active;
         this._awake.setToggleState(!!this._awakeOn);

@@ -1,0 +1,7 @@
+{
+  "uuid": "dropline@arco",
+  "name": "Dropline",
+  "description": "Cards for Dropline (pair requests, phone connected, files received) and the laptop side of clipboard sync. The Dropline service is ~/.local/bin/phone-link.",
+  "shell-version": ["48", "49", "50", "51"],
+  "version": 1
+}

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.arco.PhoneLink
+Exec=/bin/false
+SystemdService=phone-link.service

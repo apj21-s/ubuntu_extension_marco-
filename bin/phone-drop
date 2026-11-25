@@ -14,7 +14,7 @@ Running it again while it is open adds the files to the open window.
   * the link carries a random secret; it only works while this window is open and
     stops by itself after 15 minutes without use
 
-Needs qrencode (apt) and, with ufw on, the "Phone Drop" firewall rule for TCP 47800 on the
+Needs qrencode (apt) and, with ufw on, the "Phone Drop" firewall rule for TCP 47802 on the
 Wi-Fi card (both added by the system part of the installer).
 """
 import html
@@ -31,9 +31,9 @@ import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = 47800
+PORT = 47802  # 47800 belongs to Phone Link (paired phones)
 IDLE_STOP_S = 15 * 60
-INBOX = os.path.join(os.path.expanduser("~"), "Downloads", "Phone Drop")
+INBOX = os.path.join(os.path.expanduser("~"), "Downloads", "Dropline")
 CHUNK = 256 * 1024
 
 
@@ -644,8 +644,8 @@ window.phonedrop { background: var(--mood-bg); color: var(--ink); font-family: "
             self.addrs = []
             self.wifi = None  # (name, password) of the hotspot, read in the background
 
-            # a plain, flat title bar in the window's own colour (just the close button)
-            bar = Gtk.HeaderBar(show_title_buttons=True, decoration_layout=":close")
+            # a plain, flat title bar in the window's own colour (minimize and close buttons)
+            bar = Gtk.HeaderBar(show_title_buttons=True, decoration_layout=":minimize,close")
             bar.set_title_widget(Gtk.Box())
             self.set_titlebar(bar)
 

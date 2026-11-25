@@ -3,8 +3,22 @@
 # and stays in the notification list (clock menu). Takes notify-send options.
 # A new notification hides the previous popup right away.
 # Show time: NOTIFY_SECONDS (default 6).
+#
+# Do Not Disturb is smart:
+#   - You did it (quick settings tile, shortcut, terminal): pop up anyway,
+#     because it confirms your own click.
+#   - It happened by itself (a systemd user service/timer, e.g. weekly-tidy):
+#     no pop-up, no sound; it goes straight to the notification list.
+#   - NOTIFY_URGENT=1 always pops up (for things that truly can't wait).
 T=${NOTIFY_SECONDS:-6}
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/notify-last.pid"
+
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null)" != "true" ] \
+   && [ "${NOTIFY_URGENT:-0}" != "1" ] \
+   && grep -qE '/app\.slice/[^/]+\.service$' /proc/$$/cgroup 2>/dev/null; then
+  # DND + automatic: a normal notification is silently filed in the list by GNOME.
+  exec notify-send -u normal "$@"
+fi
 
 # Hide the previous popup now (its helper moves it to the list).
 if [ -f "$STATE" ]; then
@@ -23,6 +37,7 @@ else
   keep_copy=1
 fi
 
+ARGS=("$@")   # inside finish(), "$@" would be the function's own (empty) arguments
 (
   done_=0
   finish() {
@@ -30,7 +45,7 @@ fi
     [ -n "$sp" ] && kill "$sp" 2>/dev/null
     gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
       --method org.freedesktop.Notifications.CloseNotification "$id" >/dev/null 2>&1
-    [ $keep_copy -eq 1 ] && notify-send -u normal "$@"
+    [ $keep_copy -eq 1 ] && notify-send -u normal "${ARGS[@]}"
     exit 0
   }
   trap finish TERM

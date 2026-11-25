@@ -1,0 +1,1834 @@
+#!/usr/bin/python3 -I
+"""Phone Link - your paired phone and this laptop, always one tap apart.
+
+  phone-link init            make this laptop's own certificate authority + server certificate (once)
+  phone-link serve           the background service (systemd starts it; you never need to)
+  phone-link pair            show a one-time QR code to pair a new phone
+  phone-link send FILE...    send files to the connected phone (queued if none is connected)
+  phone-link status          paired phones, connected or not, battery
+  phone-link revoke ID       forget a phone; its key stops working at once
+
+How it fits together
+  * systemd holds TCP 47800 (answering on the hotspot and networks you have not blocked) and starts this service on the
+    first connection; it exits by itself after 10 idle minutes. D-Bus (io.arco.PhoneLink)
+    starts it too, for Phone Float and the Quick Settings tile.
+  * One port speaks both: plain HTTP only hands out the certificate and the pairing start
+    page; everything else is HTTPS with the laptop's own name-constrained certificate
+    authority (~/.local/share/phone-link/tls).
+  * Each phone holds its own 256-bit key in a Secure, HttpOnly, SameSite=Strict cookie.
+    Only SHA-256 hashes are kept (~/.config/phone-drop/devices.json, 0600).
+  * Phone to laptop: resumable 8 MB chunks, several at once, written straight to disk.
+    Laptop to phone: an outbox the phone drains live (Server-Sent Events) or on next open.
+"""
+import hashlib
+import hmac
+import json
+import mimetypes
+import os
+import queue
+import secrets
+import shutil
+import socket
+import ssl
+import sys
+import threading
+import time
+import urllib.parse
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOME = os.path.expanduser("~")
+PORT = 47800
+HOTSPOT_IP = "10.42.0.1"  # NetworkManager's standard hotspot address, the same on every laptop (leak-check: ok)
+NAME_HOST = socket.gethostname().lower() + ".local"   # the one address phones use on every network (mDNS)
+CONF = os.path.join(HOME, ".config", "phone-drop")
+STATE = os.path.join(HOME, ".local", "state", "phone-drop")
+SHARE = os.path.join(HOME, ".local", "share", "phone-link")
+TLS = os.path.join(SHARE, "tls")
+WEB = os.path.join(SHARE, "web")
+INBOX = os.path.join(HOME, "Downloads", "Dropline")
+DEVICES = os.path.join(CONF, "devices.json")
+OUTBOX = os.path.join(STATE, "outbox.json")
+UPLOADS = os.path.join(STATE, "uploads")
+HISTORY = os.path.join(STATE, "history.json")
+CLIP_REGISTRY = os.path.join(HOME, ".cache", "clipboard-indicator@tudmotu.com", "registry.txt")  # laptop clipboard history
+HISTORY_KEEP = 200
+SETTINGS = os.path.join(CONF, "settings.json")            # {"blocked": [NetworkManager connection UUIDs]}
+SCANS = os.path.join(INBOX, "Scans")
+SCAN_SESSION_S = 15 * 60                                    # scans this close together make one PDF
+PHONE_CLIPS = os.path.join(STATE, "phone-clips.json")   # what each phone had copied, picked from on the laptop
+PHONE_CLIPS_KEEP = 40
+SHELL_CARDS = "io.arco.DroplineShell"   # the GNOME Shell side draws cards; plain notifications are the fallback
+LOG = os.path.join(STATE, "log")
+
+CHUNK = 8 * 1024 * 1024
+RESERVE = 5 * 1024 ** 3          # never fill the disk past this much free space
+IDLE_EXIT_S = 10 * 60
+PAIR_TTL_S = 120
+OUT_TTL_S = 24 * 3600
+PART_TTL_S = 24 * 3600
+LOCK_TRIES, LOCK_S = 5, 10 * 60
+COOKIE = "__Host-pl"
+BUS_NAME, BUS_PATH = "io.arco.PhoneLink", "/io/arco/PhoneLink"
+
+
+# ---------------------------------------------------------------- small helpers
+def now():
+    return time.time()
+
+
+def log(event, **kv):
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + event + "".join(f" {k}={json.dumps(v)}" for k, v in kv.items())
+    fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(line + "\n")
+
+
+def save_json(path, data):
+    """Atomic write, owner-only."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = f"{path}.{secrets.token_hex(4)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def key_hash(key):
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def clean_name(name):
+    """A safe file name: no folders, no '..', no hidden files, no control characters."""
+    name = os.path.basename(str(name or "").replace("\\", "/")).strip()
+    name = "".join(c for c in name if c >= " " and c not in '/\\:*?"<>|')
+    return (name.lstrip(".").strip() or "file")[:180]
+
+
+def unique_path(folder, name):
+    stem, ext = os.path.splitext(name)
+    path, n = os.path.join(folder, name), 1
+    while os.path.exists(path):
+        path = os.path.join(folder, f"{stem} ({n}){ext}")
+        n += 1
+    return path
+
+
+def laptop_name():
+    """The name the phone shows: the pretty hostname if set, else "<User>'s laptop". Cached."""
+    global _NAME
+    if _NAME is None:
+        pretty = ""
+        try:
+            with open("/etc/machine-info") as f:
+                for line in f:
+                    if line.startswith("PRETTY_HOSTNAME="):
+                        pretty = line.split("=", 1)[1].strip().strip('"')
+        except OSError:
+            pass
+        _NAME = pretty or f"{os.environ.get('USER', 'my').capitalize()}'s laptop"
+    return _NAME
+
+
+_NAME = None
+
+
+def tree_size(path):
+    if not os.path.isdir(path):
+        return os.path.getsize(path)
+    return sum(os.path.getsize(os.path.join(r, f)) for r, _d, fs in os.walk(path) for f in fs
+               if os.path.isfile(os.path.join(r, f)))
+
+
+# ---------------------------------------------------------------- state
+class Hub:
+    """Everything the web server and D-Bus side share. Thread-safe."""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.devices = load_json(DEVICES, {})          # id -> {name, hash, paired, seen, battery, charging}
+        self.outbox = load_json(OUTBOX, [])            # [{id, device, kind, path|text, name, size, added}]
+        self.history = load_json(HISTORY, {})          # device id -> [{t, dir, kind, name, size}] newest last
+        self.phone_clips = load_json(PHONE_CLIPS, {})  # device id -> [{t, text}] newest last
+        self.cleared = {}                              # device id -> history just cleared (for Undo)
+        self.pending_scans = {}                        # scan id -> photo waiting for the phone to confirm corners
+        self.settings = {"blocked": [], **load_json(SETTINGS, {})}
+        self.settings.pop("trusted", None)
+        self._nets, self._nets_at = {}, 0.0            # local ip -> network, refreshed every few seconds
+        self._refused = {}                             # ip -> last time a refusal was logged
+        self.uploads = {}                              # id -> meta (see Uploads)
+        self.pairs = {}                                # code -> {expires, state, name, key, dev, ip}
+        self.streams = {}                              # device id -> [queue.Queue]
+        self.fails = {}                                # ip -> [timestamps]
+        self.last_activity = now()
+        self.on_event = lambda kind, data: None        # set by the D-Bus side
+        os.makedirs(UPLOADS, mode=0o700, exist_ok=True)
+        os.makedirs(INBOX, exist_ok=True)
+        self._load_uploads()
+        self.expire()
+
+    # ---- persistence
+    def _save_devices(self):
+        save_json(DEVICES, self.devices)
+
+    def remember(self, dev, direction, kind, name, size=0, text=None):
+        """Transfer history, kept per phone so the app shows it after a refresh or reinstall."""
+        entry = {"t": now(), "dir": direction, "kind": kind, "name": name[:200], "size": size}
+        if text is not None:
+            entry["text"] = text[:2000]
+        with self.lock:
+            lst = self.history.setdefault(dev, [])
+            lst.append(entry)
+            del lst[:-HISTORY_KEEP]
+            save_json(HISTORY, self.history)
+        self.push(dev, "history", entry)
+
+    def add_phone_clip(self, dev, text):
+        with self.lock:
+            lst = [c for c in self.phone_clips.get(dev, []) if c["text"] != text]
+            lst.append({"t": now(), "text": text})
+            self.phone_clips[dev] = lst[-PHONE_CLIPS_KEEP:]
+            save_json(PHONE_CLIPS, self.phone_clips)
+        self.on_event("phone-clip", {"id": dev})
+
+    def all_phone_clips(self):
+        with self.lock:
+            return [{"device": self.devices.get(dev, {}).get("name", "Phone"), "t": c["t"], "text": c["text"]}
+                    for dev, lst in self.phone_clips.items() if dev in self.devices for c in lst]
+
+    # ---- networks: the hotspot always; other networks only once you trust them
+    def networks(self, fresh=False):
+        """Active networks: {local ip: {uuid, name, type, device, hotspot, trusted}}."""
+        if not fresh and now() - self._nets_at < 10:
+            return self._nets
+        import subprocess
+        nets = {}
+        try:
+            con = subprocess.run(["nmcli", "-t", "-f", "UUID,NAME,TYPE,DEVICE", "con", "show", "--active"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            addrs = json.loads(subprocess.run(["ip", "-j", "addr"], capture_output=True, text=True, timeout=3).stdout or "[]")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return self._nets
+        by_dev = {}
+        for line in con.splitlines():
+            f = line.replace("\\:", "\0").split(":")
+            if len(f) >= 4 and f[3] and f[2] != "loopback":
+                by_dev[f[3]] = {"uuid": f[0], "name": f[1].replace("\0", ":"), "type": f[2], "device": f[3]}
+        for link in addrs:
+            n = by_dev.get(link.get("ifname"))
+            if not n:
+                continue
+            for a in link.get("addr_info", []):
+                ip = a.get("local", "")
+                if ip and not ip.startswith("fe80"):
+                    hotspot = n["type"] == "802-11-wireless" and ip.startswith("10.42.")
+                    nets[ip] = dict(n, hotspot=hotspot, allowed=hotspot or n["uuid"] not in self.settings["blocked"])
+        self._nets, self._nets_at = nets, now()
+        return nets
+
+    def allowed_here(self, local_ip):
+        """May a phone talk to us through this local address?"""
+        ip = local_ip[7:] if local_ip.startswith("::ffff:") else local_ip
+        if ip in ("127.0.0.1", "::1"):
+            return True
+        n = self.networks().get(ip) or self.networks(fresh=True).get(ip)
+        return bool(n and n["allowed"])
+
+    def hotspot_here(self, local_ip):
+        ip = local_ip[7:] if local_ip.startswith("::ffff:") else local_ip
+        n = self.networks().get(ip)
+        return ip in ("127.0.0.1", "::1") or bool(n and n["hotspot"])
+
+    def refused(self, ip, local):
+        if now() - self._refused.get(ip, 0) > 300:
+            self._refused[ip] = now()
+            log("refused-untrusted-network", ip=ip, via=local)
+
+    def set_allowed(self, uuid, on):
+        with self.lock:
+            b = set(self.settings["blocked"])
+            (b.discard if on else b.add)(uuid)
+            self.settings["blocked"] = sorted(b)
+            save_json(SETTINGS, self.settings)
+            self._nets_at = 0
+        log("network-allowed" if on else "network-blocked", uuid=uuid)
+        self.on_event("changed", None)
+
+    def _save_outbox(self):
+        save_json(OUTBOX, self.outbox)
+
+    def _load_uploads(self):
+        for f in os.listdir(UPLOADS):
+            if f.endswith(".json"):
+                meta = load_json(os.path.join(UPLOADS, f), None)
+                if meta:
+                    meta["chunks"] = set(meta.get("chunks", []))
+                    self.uploads[meta["id"]] = meta
+
+    def save_upload(self, meta):
+        data = dict(meta, chunks=sorted(meta["chunks"]))
+        save_json(os.path.join(UPLOADS, meta["id"] + ".json"), data)
+
+    def drop_upload(self, uid, delete_part=True):
+        meta = self.uploads.pop(uid, None)
+        if meta:
+            try:
+                os.unlink(os.path.join(UPLOADS, uid + ".json"))
+            except OSError:
+                pass
+            if delete_part:
+                try:
+                    os.unlink(meta["part"])
+                except OSError:
+                    pass
+
+    def expire(self):
+        """Drop outbox items older than a day (or whose file is gone) and stale partial uploads."""
+        t = now()
+        with self.lock:
+            keep = [o for o in self.outbox if t - o["added"] < OUT_TTL_S and (o["kind"] == "text" or os.path.exists(o["path"]))]
+            if len(keep) != len(self.outbox):
+                self.outbox = keep
+                self._save_outbox()
+            for uid, meta in list(self.uploads.items()):
+                if t - meta.get("touched", 0) > PART_TTL_S:
+                    log("upload-expired", name=meta["name"])
+                    self.drop_upload(uid)
+            for code in [c for c, p in self.pairs.items() if p["expires"] < t]:
+                del self.pairs[code]
+            for sid, p in list(self.pending_scans.items()):
+                if t - p["t"] > 3600:
+                    self.pending_scans.pop(sid, None)
+                    try:
+                        os.unlink(p["path"])
+                    except OSError:
+                        pass
+
+    # ---- auth
+    def device_for(self, key):
+        if not key:
+            return None
+        h = key_hash(key)
+        with self.lock:
+            for dev, d in self.devices.items():
+                if hmac.compare_digest(d["hash"], h):
+                    return dev
+        return None
+
+    def locked(self, ip):
+        t = now()
+        with self.lock:
+            tries = [x for x in self.fails.get(ip, []) if t - x < LOCK_S]
+            self.fails[ip] = tries
+            return len(tries) >= LOCK_TRIES
+
+    def lockouts(self):
+        """Addresses locked out right now: [{ip, minutes_left}]."""
+        t = now()
+        with self.lock:
+            out = []
+            for ip, tries in self.fails.items():
+                recent = [x for x in tries if t - x < LOCK_S]
+                if len(recent) >= LOCK_TRIES:
+                    out.append({"ip": ip, "minutes_left": max(1, round((LOCK_S - (t - recent[-LOCK_TRIES])) / 60))})
+            return out
+
+    def unlock(self, ip):
+        with self.lock:
+            had = bool(self.fails.pop(ip, None))
+        if had:
+            log("unlocked", ip=ip)
+            self.on_event("changed", None)
+        return had
+
+    def failed(self, ip, why):
+        with self.lock:
+            self.fails.setdefault(ip, []).append(now())
+            n = len(self.fails[ip])
+        log("auth-fail", ip=ip, why=why, count=n)
+        if n == LOCK_TRIES:
+            log("locked", ip=ip, minutes=LOCK_S // 60)
+            self.on_event("locked", {"ip": ip})
+
+    # ---- devices
+    def status(self):
+        with self.lock:
+            return {"laptop": laptop_name(), "devices": [
+                {"id": dev, "name": d["name"], "connected": bool(self.streams.get(dev)), "battery": d.get("battery"),
+                 "charging": d.get("charging"), "seen": d.get("seen"), "paired": d.get("paired")}
+                for dev, d in sorted(self.devices.items(), key=lambda kv: -kv[1].get("seen", 0))],
+                "outbox": len(self.outbox)}
+
+    def add_device(self, name):
+        dev, key = secrets.token_hex(6), secrets.token_urlsafe(32)
+        with self.lock:
+            self.devices[dev] = {"name": name, "hash": key_hash(key), "paired": now(), "seen": now()}
+            self._save_devices()
+        return dev, key
+
+    def revoke(self, dev):
+        with self.lock:
+            d = self.devices.pop(dev, None)
+            if not d:
+                return False
+            self._save_devices()
+            for q in self.streams.pop(dev, []):
+                q.put(None)  # closes its live stream
+            self.outbox = [o for o in self.outbox if o["device"] != dev]
+            self._save_outbox()
+            self.history.pop(dev, None)
+            save_json(HISTORY, self.history)
+            self.phone_clips.pop(dev, None)
+            save_json(PHONE_CLIPS, self.phone_clips)
+        log("revoked", name=d["name"])
+        self.on_event("changed", None)
+        return True
+
+    def touch(self, dev, **fields):
+        with self.lock:
+            d = self.devices.get(dev)
+            if d:
+                d.update(fields, seen=now())
+                self._save_devices()
+
+    # ---- live streams
+    def attach(self, dev):
+        q = queue.Queue()
+        with self.lock:
+            first = not self.streams.get(dev)
+            self.streams.setdefault(dev, []).append(q)
+        if first:
+            log("connected", name=self.devices.get(dev, {}).get("name"))
+            self.on_event("connected", {"id": dev})
+        return q
+
+    def detach(self, dev, q):
+        with self.lock:
+            lst = self.streams.get(dev, [])
+            if q in lst:
+                lst.remove(q)
+            last = not lst
+            if last:
+                self.streams.pop(dev, None)
+        if last:
+            self.on_event("disconnected", {"id": dev})
+
+    def push(self, dev, event, data):
+        with self.lock:
+            for q in self.streams.get(dev, []):
+                q.put((event, data))
+
+    # ---- outbox
+    def offer(self, paths, text, dev):
+        """Queue files/text for a phone. dev "" picks the connected phone, else the only paired one."""
+        with self.lock:
+            if not dev:
+                live = list(self.streams)
+                dev = live[0] if len(live) == 1 else (next(iter(self.devices)) if len(self.devices) == 1 else "")
+            if dev not in self.devices:
+                return "no-phone"
+            items = []
+            for p in paths:
+                p = os.path.abspath(p)
+                if not os.path.exists(p):
+                    continue
+                isdir = os.path.isdir(p)
+                items.append({"id": secrets.token_hex(5), "device": dev, "kind": "dir" if isdir else "file", "path": p,
+                              "name": os.path.basename(p.rstrip("/")) + (".zip" if isdir else ""),
+                              "size": tree_size(p), "added": now()})
+            if text and text.strip():
+                items.append({"id": secrets.token_hex(5), "device": dev, "kind": "text", "text": text.strip()[:100000],
+                              "name": "Text", "size": len(text.encode()), "added": now()})
+            if not items:
+                return "nothing"
+            self.outbox.extend(items)
+            self._save_outbox()
+            live = bool(self.streams.get(dev))
+        for it in items:
+            log("offered", name=it["name"], size=it["size"], to=self.devices[dev]["name"])
+        self.push(dev, "out", self.out_for(dev))
+        return "live" if live else "queued"
+
+    def out_for(self, dev):
+        with self.lock:
+            return [{k: v for k, v in o.items() if k not in ("path", "device")} for o in self.outbox if o["device"] == dev]
+
+    def take(self, dev, oid):
+        with self.lock:
+            for o in self.outbox:
+                if o["id"] == oid and o["device"] == dev:
+                    return o
+        return None
+
+    def delivered(self, dev, oid):
+        with self.lock:
+            before = len(self.outbox)
+            self.outbox = [o for o in self.outbox if not (o["id"] == oid and o["device"] == dev)]
+            if len(self.outbox) != before:
+                self._save_outbox()
+        self.push(dev, "out", self.out_for(dev))
+
+    def busy(self):
+        """True while anything would be lost or interrupted by exiting."""
+        with self.lock:
+            return bool(self.streams) or bool(self.pairs) or any(now() - u.get("touched", 0) < 120 for u in self.uploads.values())
+
+
+# ---------------------------------------------------------------- scans
+def _cv():
+    """OpenCV and numpy, imported only when a scan is processed (keeps the idle service small)."""
+    import cv2
+    import numpy
+    return cv2, numpy
+
+
+# Page finding, perspective warp and cleanup (OpenCV). The phone shows the suggested corners and the
+# person drags them before anything is saved, so a wrong guess never ruins a scan.
+def order(pts):
+    cv2, np = _cv()
+    s, d = pts.sum(1), np.diff(pts, axis=1).ravel()
+    return np.array([pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]], np.float32)  # tl tr br bl
+
+def plausible(q, qa, area):
+    """A page seen by a hand-held camera: big, corners near 90 degrees, sane proportions."""
+    cv2, np = _cv()
+    if qa < .30 * area:
+        return False
+    o = order(q)
+    for i in range(4):
+        a, b, c = o[i - 1], o[i], o[(i + 1) % 4]
+        v1, v2 = a - b, c - b
+        ang = np.degrees(np.arccos(np.clip(v1 @ v2 / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6), -1, 1)))
+        if not 55 <= ang <= 125:
+            return False
+    w = (np.linalg.norm(o[1] - o[0]) + np.linalg.norm(o[2] - o[3])) / 2
+    h = (np.linalg.norm(o[3] - o[0]) + np.linalg.norm(o[2] - o[1])) / 2
+    return .45 <= w / max(h, 1) <= 2.2
+
+def find_page(img):
+    """Four corners of the page, or None. Works on a ~1000 px copy."""
+    cv2, np = _cv()
+    h, w = img.shape[:2]
+    k = 1000 / max(h, w)
+    small = cv2.resize(img, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA)
+    area = small.shape[0] * small.shape[1]
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    # close over the writing so text edges don't win against the page edge
+    closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)), iterations=2)
+    cands = []
+    v = np.median(closed)
+    for lo, hi in ((int(max(0, .66 * v)), int(min(255, 1.33 * v))), (30, 100), (75, 200)):
+        e = cv2.dilate(cv2.Canny(closed, lo, hi), np.ones((5, 5), np.uint8), iterations=1)
+        cs, _ = cv2.findContours(e, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        cands += sorted(cs, key=cv2.contourArea, reverse=True)[:8]
+    # also: the bright, low-saturation region (paper)
+    hsv = cv2.cvtColor(cv2.GaussianBlur(small, (9, 9), 0), cv2.COLOR_BGR2HSV)
+    paper = ((hsv[..., 2] > np.percentile(hsv[..., 2], 40)) & (hsv[..., 1] < 70)).astype(np.uint8) * 255
+    paper = cv2.morphologyEx(paper, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8))
+    cs, _ = cv2.findContours(paper, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cands += sorted(cs, key=cv2.contourArea, reverse=True)[:2]
+    best = None
+    for c in cands:
+        a = cv2.contourArea(c)
+        if a < .25 * area:
+            continue
+        hull = cv2.convexHull(c)
+        peri = cv2.arcLength(hull, True)
+        for eps in (.02, .03, .05):
+            q = cv2.approxPolyDP(hull, eps * peri, True)
+            if len(q) == 4 and cv2.isContourConvex(q):
+                qa = cv2.contourArea(q)
+                if plausible(q.reshape(4, 2).astype(np.float32), qa, area) and (best is None or qa > best[0]):
+                    best = (qa, q.reshape(4, 2).astype(np.float32))
+                break
+    if best is None or best[0] > .985 * area:   # no page found, or it is just the photo's border
+        return None
+    return order(best[1] / k)
+
+def warp(img, q):
+    cv2, np = _cv()
+    tl, tr, br, bl = q
+    W = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+    H = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+    M = cv2.getPerspectiveTransform(q, np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32))
+    return cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+def enhance(img):
+    """Divide out the paper's light per channel (shadows + colour cast), keep ink colour."""
+    cv2, np = _cv()
+    h, w = img.shape[:2]
+    k = max(1, max(h, w) // 750)
+    small = cv2.resize(img, (w // k, h // k), interpolation=cv2.INTER_AREA)
+    bg = cv2.GaussianBlur(cv2.dilate(small, np.ones((15, 15), np.uint8)), (0, 0), 12)
+    bg = cv2.resize(bg, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    r = np.clip(img.astype(np.float32) / np.maximum(bg, 1), 0, 1)
+    lum = r.mean(2, keepdims=True)
+    l2 = np.clip((lum - .30) / (.86 - .30), 0, 1) ** 1.25
+    out = np.clip(r * (l2 / np.maximum(lum, 1e-3)), 0, 1)
+    g = out.mean(2, keepdims=True)
+    out = np.clip(g + (out - g) * 1.15, 0, 1)
+    out[np.repeat(l2, 3, 2) >= .999] = 1
+    return (out * 255).astype(np.uint8)
+
+
+def load_upright(src, longest=3000):
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageOps
+    pil = ImageOps.exif_transpose(Image.open(src)).convert("RGB")   # same orientation the phone shows
+    if max(pil.size) > longest:
+        pil.thumbnail((longest, longest), Image.LANCZOS)
+    return cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+
+
+def suggest_corners(src):
+    """Corners as fractions of the upright photo (tl, tr, br, bl), and whether a page was found."""
+    img = load_upright(src, 1400)
+    q = find_page(img)
+    h, w = img.shape[:2]
+    if q is None:
+        return [[0, 0], [1, 0], [1, 1], [0, 1]], False
+    return [[round(float(x) / w, 4), round(float(y) / h, 4)] for x, y in q], True
+
+
+def render_scan(src, out, corners=None, mode="color"):
+    """corners: fractions from the phone (None = whole photo). mode: color | bw | original."""
+    import cv2
+    import numpy as np
+    img = load_upright(src)
+    h, w = img.shape[:2]
+    if corners and len(corners) == 4:
+        q = order(np.array([[min(max(x, 0), 1) * (w - 1), min(max(y, 0), 1) * (h - 1)] for x, y in corners], np.float32))
+        full = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.float32)
+        if np.abs(q - full).max() > 2:
+            img = warp(img, q)
+    if mode == "original":
+        res = img
+    else:
+        res = enhance(img)
+        if mode == "bw":
+            g = cv2.cvtColor(res, cv2.COLOR_BGR2GRAY)
+            # the cleaned page is already near-white: a wide window and a firm offset keep paper grain
+            # and see-through out, then tiny specks are removed and strokes stay intact
+            res = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 51, 22)
+            ink = 255 - res
+            n, lab, stats, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+            keep = np.zeros(n, bool)
+            keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= max(6, (res.shape[0] * res.shape[1]) // 400000)
+            res = np.where(keep[lab], 0, 255).astype(np.uint8)
+    cv2.imwrite(out, res, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+
+def recent_scans():
+    """Cleaned scans saved in the last 15 minutes, oldest first (read from the folder, so it
+    survives the service stopping between pages)."""
+    try:
+        files = [os.path.join(SCANS, f) for f in os.listdir(SCANS) if f.startswith("Scan ") and f.endswith(".jpg")]
+    except OSError:
+        return []
+    files = [(os.path.getmtime(f), f) for f in files if now() - os.path.getmtime(f) < SCAN_SESSION_S]
+    return [f for _t, f in sorted(files)]
+
+
+def make_scan_pdf(hub):
+    """Every scan from the last 15 minutes, in order, as one PDF next to them. Searchable (Tesseract OCR)
+    when it is installed; a plain image PDF otherwise."""
+    import subprocess
+    import tempfile
+    pages = recent_scans()
+    if not pages:
+        return None
+    out = unique_path(SCANS, time.strftime("Scans %Y-%m-%d %H.%M") + ".pdf")
+    if shutil.which("tesseract"):
+        with tempfile.TemporaryDirectory() as tmp:
+            lst = os.path.join(tmp, "pages.txt")
+            with open(lst, "w") as f:
+                f.write("\n".join(pages) + "\n")
+            base = os.path.join(tmp, "out")
+            r = subprocess.run(["tesseract", lst, base, "-l", "eng", "--dpi", "200", "pdf"], capture_output=True, text=True, timeout=600)
+            if r.returncode == 0 and os.path.exists(base + ".pdf"):
+                shutil.move(base + ".pdf", out)
+                log("scan-pdf", name=os.path.basename(out), pages=len(pages), searchable=True)
+                return out
+            log("ocr-failed", err=r.stderr[-200:])
+    from PIL import Image
+    ims = [Image.open(p).convert("RGB") for p in pages]
+    ims[0].save(out, save_all=True, append_images=ims[1:], resolution=200)
+    log("scan-pdf", name=os.path.basename(out), pages=len(pages), searchable=False)
+    return out
+
+
+# ---------------------------------------------------------------- laptop clipboard history
+def clip_history(limit=60):
+    """The laptop's clipboard history (kept by the Clipboard Indicator extension), newest first.
+    Read fresh on each request, only when a paired phone asks for it."""
+    items = load_json(CLIP_REGISTRY, [])
+    out = []
+    for it in reversed(items if isinstance(items, list) else []):
+        c, mt = it.get("contents"), str(it.get("mimetype", ""))
+        if not isinstance(c, str) or not c:
+            continue
+        cid = hashlib.sha1(c.encode()).hexdigest()[:12]
+        if mt.startswith("text/"):
+            out.append({"id": cid, "kind": "text", "text": c[:20000], "fav": bool(it.get("favorite"))})
+        elif mt.startswith("image/") and clip_image_path(c):
+            out.append({"id": cid, "kind": "image", "fav": bool(it.get("favorite"))})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def clip_image_path(path):
+    """Only images inside Clipboard Indicator's own cache folder are ever served."""
+    base = os.path.realpath(os.path.dirname(CLIP_REGISTRY))
+    real = os.path.realpath(path)
+    return real if real.startswith(base + os.sep) and os.path.isfile(real) else None
+
+
+# ---------------------------------------------------------------- web server
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "PhoneLink"
+    sys_version = ""
+    hub: Hub = None
+
+    def log_message(self, *_a):
+        pass
+
+    # ---- plumbing
+    @property
+    def tls(self):
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    @property
+    def ip(self):
+        ip = self.client_address[0]
+        return ip[7:] if ip.startswith("::ffff:") else ip
+
+    def headers_common(self, ctype, length, extra=None, cache="no-store"):
+        self.send_header("Content-Type", ctype)
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        if ctype.startswith("text/html"):
+            self.send_header("Content-Security-Policy",
+                             "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+                             "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        if self.tls:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+
+    def reply(self, code, body=b"", ctype="application/json", extra=None, cache="no-store"):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode()
+        elif isinstance(body, str):
+            body = body.encode()
+        self.send_response(code)
+        self.headers_common(ctype, len(body), extra, cache)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def json_body(self, limit=1_000_000):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > limit:
+            raise ValueError("too large")
+        try:
+            return json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            return {}
+
+    def cookie_key(self):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == COOKIE:
+                return v
+        return None
+
+    def host_ok(self):
+        host = (self.headers.get("Host") or "").lower()
+        return host in (f"{HOTSPOT_IP}:{PORT}", f"{NAME_HOST}:{PORT}")
+
+    def origin_ok(self):
+        """State-changing requests must come from our own pages."""
+        if self.command in ("GET", "HEAD"):
+            return True
+        origin = self.headers.get("Origin")
+        if origin and origin != "https://" + self.headers.get("Host", ""):
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        return site in (None, "same-origin", "none")
+
+    def device(self):
+        """The paired device making this request, or None (and counts a bad key)."""
+        key = self.cookie_key()
+        dev = self.hub.device_for(key)
+        if key and not dev:
+            self.hub.failed(self.ip, "bad key")
+        return dev
+
+    # ---- dispatch
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def do_PUT(self):
+        self.route("PUT")
+
+    def do_DELETE(self):
+        self.route("DELETE")
+
+    def route(self, method):
+        hub = self.hub
+        hub.last_activity = now()
+        if not self.host_ok():
+            log("bad-host", ip=self.ip, host=self.headers.get("Host"))
+            self.close_connection = True
+            return self.reply(421, {"error": "wrong host"})
+        if hub.locked(self.ip):
+            self.close_connection = True
+            return self.reply(429, {"error": "locked, try later"})
+        url = urllib.parse.urlsplit(self.path)
+        path, query = url.path, urllib.parse.parse_qs(url.query)
+        parts = [p for p in path.split("/") if p]
+        pairing = parts[:1] == ["p"] or parts[:2] == ["api", "pair"] or path in ("/ca.crt", "/setup.js")
+        if pairing and not hub.hotspot_here(self.connection.getsockname()[0]):
+            return self.reply(403, "Pair new phones on the laptop's hotspot.", "text/plain; charset=utf-8")
+
+        # plain HTTP: only the certificate and the pairing start page
+        if not self.tls:
+            if method == "GET" and path == "/ca.crt":
+                return self.static("ca.der", "application/x-x509-ca-cert", disp='attachment; filename="phone-link-ca.crt"', base=TLS)
+            if method == "GET" and len(parts) == 2 and parts[0] == "p":
+                return self.static("setup.html", "text/html; charset=utf-8")
+            if method == "GET" and path in ("/app.css", "/setup.js"):
+                return self.static(path[1:], mimetypes.guess_type(path)[0])
+            return self.reply(308, b"", "text/plain", {"Location": f"https://{self.headers['Host']}{self.path}"})
+
+        if not self.origin_ok():
+            log("bad-origin", ip=self.ip, origin=self.headers.get("Origin"))
+            return self.reply(403, {"error": "cross-site"})
+
+        # static app (no secrets in it, so no key needed)
+        if method == "GET" and parts[:1] != ["api"]:
+            if path in ("/", "/app"):
+                return self.static("app.html", "text/html; charset=utf-8")
+            if len(parts) == 2 and parts[0] == "p":
+                return self.static("pair.html", "text/html; charset=utf-8")
+            if path == "/ca.crt":
+                return self.static("ca.der", "application/x-x509-ca-cert", disp='attachment; filename="phone-link-ca.crt"', base=TLS)
+            if path == "/sw.js":
+                return self.static("sw.js", "text/javascript", extra={"Service-Worker-Allowed": "/"})
+            if path == "/manifest.webmanifest":
+                return self.static("manifest.webmanifest", "application/manifest+json")
+            name = path.lstrip("/")
+            if name and "/" not in name and not name.startswith(".") and os.path.isfile(os.path.join(WEB, name)):
+                return self.static(name, mimetypes.guess_type(name)[0] or "application/octet-stream", cache="no-cache")
+            return self.reply(404, {"error": "not found"})
+
+        api = parts[1:]
+        # pairing (no key yet)
+        if api[:1] == ["pair"] and len(api) == 2:
+            return self.api_pair(method, api[1])
+        if api == ["ping"]:
+            return self.reply(200, {"ok": True})
+
+        dev = self.device()
+        if not dev:
+            return self.reply(401, {"error": "not paired"})
+        try:
+            if method == "GET" and api == ["me"]:
+                hub.touch(dev)
+                d = hub.devices[dev]
+                return self.reply(200, {"id": dev, "name": d["name"], "laptop": laptop_name(), "chunk": CHUNK})
+            if method == "GET" and api == ["events"]:
+                return self.api_events(dev)
+            if method == "POST" and api == ["status"]:
+                b = self.json_body()
+                lvl = b.get("battery")
+                hub.touch(dev, battery=float(lvl) if isinstance(lvl, (int, float)) else None, charging=bool(b.get("charging")))
+                hub.on_event("changed", None)
+                return self.reply(204)
+            if method == "GET" and api == ["out"]:
+                return self.reply(200, hub.out_for(dev))
+            if api[:1] == ["f"] and len(api) >= 2:
+                return self.api_file(method, dev, api[1], api[2:])
+            if api[:1] == ["up"]:
+                return self.api_upload(method, dev, api[1:], query)
+            if method == "POST" and api == ["text"]:
+                text = str(self.json_body().get("text", ""))[:100000]
+                if text.strip():
+                    log("text-in", chars=len(text), frm=hub.devices[dev]["name"])
+                    hub.remember(dev, "up", "text", text.split("\n")[0][:80], len(text.encode()), text)
+                    hub.on_event("text", {"text": text, "id": dev})
+                return self.reply(204)
+            if api[:1] == ["scan"] and len(api) == 2:
+                return self.api_scan(method, dev, api[1])
+            if api[:1] == ["speed"]:  # speed test: nothing is saved anywhere
+                return self.api_speed(method, dev, api[1:], query)
+            if method == "POST" and api == ["migrate"]:
+                code = secrets.token_urlsafe(16)
+                with hub.lock:
+                    hub.pairs[code] = {"expires": now() + PAIR_TTL_S, "state": "allowed", "name": hub.devices[dev]["name"],
+                                       "replace": dev, "ip": self.ip}
+                log("migrate", name=hub.devices[dev]["name"])
+                return self.reply(200, {"url": f"https://{NAME_HOST}:{PORT}/p/{code}?m=1"})
+            if method == "POST" and api == ["scans", "pdf"]:  # "Make PDF" tapped on the phone
+                n = len(recent_scans())
+                if not n:
+                    return self.reply(404, {"error": "no recent scans"})
+                hub.on_event("make-pdf", {"id": dev})
+                return self.reply(202, {"pages": n})
+            if method == "POST" and api == ["link"]:  # shared from the phone: open it in the laptop's browser
+                url = str(self.json_body().get("url", "")).strip()
+                parts_ = urllib.parse.urlsplit(url)
+                if parts_.scheme not in ("http", "https") or not parts_.netloc or len(url) > 4096 or any(c in url for c in " \n\r\t"):
+                    raise ValueError("not a web link")
+                log("link-in", host=parts_.netloc, frm=hub.devices[dev]["name"])
+                hub.remember(dev, "up", "link", url[:200], 0, url)
+                hub.on_event("link", {"url": url, "id": dev})
+                return self.reply(204)
+            if method == "POST" and api == ["phoneclip"]:
+                text = str(self.json_body().get("text", ""))[:20000]
+                if text.strip():
+                    hub.add_phone_clip(dev, text)
+                return self.reply(204)
+            if method == "GET" and api == ["clips"]:
+                return self.reply(200, clip_history())
+            if method == "GET" and len(api) == 2 and api[0] == "clips":
+                return self.clip_image(api[1])
+            if method == "GET" and api == ["history"]:
+                with hub.lock:
+                    return self.reply(200, hub.history.get(dev, [])[-HISTORY_KEEP:])
+            if method == "DELETE" and api == ["history"]:  # clears the list only; files stay where they are
+                with hub.lock:
+                    hub.cleared[dev] = hub.history.pop(dev, [])   # kept in memory for Undo
+                    save_json(HISTORY, hub.history)
+                log("history-cleared", name=hub.devices[dev]["name"])
+                return self.reply(204)
+            if method == "POST" and api == ["history", "restore"]:
+                with hub.lock:
+                    back = hub.cleared.pop(dev, [])
+                    hub.history[dev] = (back + hub.history.get(dev, []))[-HISTORY_KEEP:]
+                    save_json(HISTORY, hub.history)
+                log("history-restored", name=hub.devices[dev]["name"], items=len(back))
+                return self.reply(204)
+        except (ValueError, KeyError, TypeError) as e:
+            self.close_connection = True  # an unread request body would garble the next request
+            return self.reply(400, {"error": str(e)[:100]})
+        return self.reply(404, {"error": "not found"})
+
+    def clip_image(self, cid):
+        for it in reversed(load_json(CLIP_REGISTRY, [])):
+            c = it.get("contents")
+            if isinstance(c, str) and hashlib.sha1(c.encode()).hexdigest()[:12] == cid and str(it.get("mimetype", "")).startswith("image/"):
+                path = clip_image_path(c)
+                if path:
+                    with open(path, "rb") as f:
+                        body = f.read()
+                    return self.reply(200, body, it["mimetype"].split(";")[0], cache="private, max-age=3600")
+        return self.reply(404, {"error": "gone"})
+
+    def api_speed(self, method, dev, rest, query):
+        block = b"\x5a" * (1024 * 1024)
+        if method == "GET" and rest == ["down"]:
+            mb = max(1, min(500, int((query.get("mb") or ["100"])[0])))
+            self.send_response(200)
+            self.headers_common("application/octet-stream", mb * len(block), cache="no-store")
+            self.end_headers()
+            for _ in range(mb):
+                self.wfile.write(block)
+            return
+        if method == "POST" and rest == ["up"]:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 600 * 1024 * 1024:
+                raise ValueError("too large")
+            t0, left = time.monotonic(), n
+            while left:
+                buf = self.rfile.read(min(1024 * 1024, left))
+                if not buf:
+                    break
+                left -= len(buf)
+            return self.reply(200, {"bytes": n - left, "server_secs": round(time.monotonic() - t0, 3)})
+        if method == "POST" and rest == ["result"]:
+            b = self.json_body()
+            log("speedtest", frm=self.hub.devices[dev]["name"], down_mbps=b.get("down"), up_mbps=b.get("up"))
+            return self.reply(204)
+        return self.reply(404, {"error": "not found"})
+
+    def finish_scan(self, dev, uid, meta):
+        """A photo of a page arrived: keep it, suggest corners. Nothing is saved as a scan until the
+        phone confirms the corners (POST /api/scan/<id>)."""
+        hub = self.hub
+        with hub.lock:
+            if len(meta["chunks"]) != meta["total"] or os.path.getsize(meta["part"]) != meta["size"]:
+                return self.reply(409, {"error": "incomplete", "have": sorted(meta["chunks"])})
+            os.makedirs(os.path.join(SCANS, "originals"), exist_ok=True)
+            sid = secrets.token_hex(6)
+            original = os.path.join(SCANS, "originals", f".pending-{sid}.jpg")
+            os.chmod(meta["part"], 0o644)
+            os.replace(meta["part"], original)
+            hub.drop_upload(uid, delete_part=False)
+            hub.pending_scans[sid] = {"dev": dev, "path": original, "t": now()}
+        try:
+            corners, found = suggest_corners(original)
+        except Exception as e:
+            log("scan-detect-failed", err=repr(e)[:120])
+            corners, found = [[0, 0], [1, 0], [1, 1], [0, 1]], False
+        return self.reply(200, {"scan": sid, "corners": corners, "found": found})
+
+    def api_scan(self, method, dev, sid):
+        hub = self.hub
+        p = hub.pending_scans.get(sid)
+        if not p or p["dev"] != dev:
+            return self.reply(404, {"error": "gone"})
+        if method == "DELETE":   # retake
+            hub.pending_scans.pop(sid, None)
+            try:
+                os.unlink(p["path"])
+            except OSError:
+                pass
+            return self.reply(204)
+        if method != "POST":
+            return self.reply(405, {"error": "method"})
+        b = self.json_body()
+        mode = b.get("mode") if b.get("mode") in ("color", "bw", "original") else "color"
+        corners = b.get("corners")
+        if corners is not None and not (isinstance(corners, list) and len(corners) == 4
+                                        and all(isinstance(c, list) and len(c) == 2 and all(isinstance(v, (int, float)) for v in c) for c in corners)):
+            raise ValueError("corners")
+        name = time.strftime("Scan %Y-%m-%d %H.%M.%S") + ".jpg"
+        original = unique_path(os.path.join(SCANS, "originals"), name)
+        os.replace(p["path"], original)
+        hub.pending_scans.pop(sid, None)
+        dest = unique_path(SCANS, name)
+        try:
+            render_scan(original, dest, corners, mode)
+        except Exception as e:  # an odd image still lands, just not processed
+            log("scan-render-failed", err=repr(e)[:120])
+            shutil.copy2(original, dest)
+        pages = len(recent_scans())
+        log("scan", name=os.path.basename(dest), frm=hub.devices[dev]["name"], pages=pages, mode=mode)
+        hub.remember(dev, "up", "scan", os.path.basename(dest), os.path.getsize(dest))
+        hub.on_event("scan", {"path": dest, "pages": pages, "id": dev})
+        return self.reply(200, {"saved": os.path.basename(dest), "pages": pages})
+
+    def static(self, name, ctype, disp=None, base=WEB, extra=None, cache="no-cache"):
+        try:
+            with open(os.path.join(base, name), "rb") as f:
+                body = f.read()
+        except OSError:
+            return self.reply(404, {"error": "missing"})
+        hdr = dict(extra or {})
+        if disp:
+            hdr["Content-Disposition"] = disp
+        self.reply(200, body, ctype, hdr, cache)
+
+    # ---- pairing
+    def api_pair(self, method, code):
+        hub = self.hub
+        with hub.lock:
+            p = hub.pairs.get(code)
+            if p and p["expires"] < now():
+                hub.pairs.pop(code, None)
+                p = None
+        if not p:
+            hub.failed(self.ip, "bad pair code")
+            return self.reply(404, {"state": "expired"})
+        if method == "POST":
+            if p["state"] != "new":
+                return self.reply(409, {"state": p["state"]})
+            name = " ".join(str(self.json_body().get("name", "")).split())[:40] or "Phone"
+            with hub.lock:
+                p.update(state="waiting", name=name, ip=self.ip, expires=now() + PAIR_TTL_S)
+            log("pair-request", name=name, ip=self.ip)
+            hub.on_event("pair-request", {"code": code, "name": name})
+            return self.reply(202, {"state": "waiting"})
+        if method == "GET":
+            if p.get("ip") and p["ip"] != self.ip:
+                return self.reply(403, {"state": "other"})
+            if p["state"] == "allowed" and p.get("replace") in hub.devices:
+                dev, key = p["replace"], secrets.token_urlsafe(32)
+                with hub.lock:
+                    hub.devices[dev]["hash"] = key_hash(key)   # the old key stops working
+                    hub._save_devices()
+                    hub.pairs.pop(code, None)
+                log("moved", name=p["name"])
+                cookie = f"{COOKIE}={key}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=315360000"
+                return self.reply(200, {"state": "ok", "name": p["name"]}, extra={"Set-Cookie": cookie})
+            if p["state"] == "allowed":
+                dev, key = hub.add_device(p["name"])
+                with hub.lock:
+                    hub.pairs.pop(code, None)
+                log("paired", name=p["name"], ip=self.ip)
+                hub.on_event("paired", {"id": dev, "name": p["name"]})
+                cookie = f"{COOKIE}={key}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=315360000"
+                return self.reply(200, {"state": "ok", "name": p["name"]}, extra={"Set-Cookie": cookie})
+            if p["state"] == "denied":
+                with hub.lock:
+                    hub.pairs.pop(code, None)
+            return self.reply(200, {"state": p["state"]})
+        return self.reply(405, {"error": "method"})
+
+    # ---- live events (Server-Sent Events)
+    def api_events(self, dev):
+        hub = self.hub
+        self.send_response(200)
+        self.headers_common("text/event-stream", None, {"Connection": "close", "X-Accel-Buffering": "no"})
+        self.end_headers()
+        self.close_connection = True
+        q = hub.attach(dev)
+        try:
+            local = self.connection.getsockname()[0].removeprefix("::ffff:")
+            net = hub.networks().get(local) or {}
+            via = ("Hotspot" if net.get("hotspot") else net.get("name", "Wi-Fi")) if net else ""
+            band = ""
+            if net.get("hotspot"):
+                import subprocess
+                try:
+                    band = "5 GHz" if subprocess.run(["nmcli", "-g", "802-11-wireless.band", "con", "show", net["uuid"]],
+                                                     capture_output=True, text=True, timeout=2).stdout.strip() == "a" else "2.4 GHz"
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            self.sse("hello", {"laptop": laptop_name(), "out": hub.out_for(dev), "via": " · ".join(x for x in (via, band) if x)})
+            while True:
+                try:
+                    item = q.get(timeout=25)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                if item is None:
+                    break
+                self.sse(*item)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            hub.detach(dev, q)
+
+    def sse(self, event, data):
+        self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
+        self.wfile.flush()
+
+    # ---- laptop -> phone
+    def api_file(self, method, dev, oid, rest):
+        hub = self.hub
+        item = hub.take(dev, oid)
+        if not item:
+            return self.reply(404, {"error": "gone"})
+        if method == "POST" and rest == ["done"]:  # text copied or dismissed on the phone
+            self.finished(dev, item)
+            return self.reply(204)
+        if method not in ("GET", "HEAD"):
+            return self.reply(405, {"error": "method"})
+        name = item["name"]
+        disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(name)
+        if item["kind"] == "text":
+            return self.reply(200, item["text"], "text/plain; charset=utf-8")
+        if item["kind"] == "dir":
+            return self.send_zip(item["path"], disp, dev, item)
+        path = item["path"]
+        try:
+            size = os.path.getsize(path)
+            f = open(path, "rb")
+        except OSError:
+            return self.reply(404, {"error": "file moved"})
+        with f:
+            start, end = 0, size - 1
+            rng = self.headers.get("Range", "")
+            code = 200
+            if rng.startswith("bytes=") and size:
+                a, _, b = rng[6:].split(",")[0].partition("-")
+                if a:
+                    start, end = int(a), (min(int(b), size - 1) if b else size - 1)
+                elif b:
+                    start, end = max(0, size - int(b)), size - 1
+                if start > end or start >= size:
+                    return self.reply(416, b"", "text/plain", {"Content-Range": f"bytes */{size}"})
+                code = 206
+            length = max(0, end - start + 1) if size else 0
+            ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+            self.send_response(code)
+            extra = {"Content-Disposition": disp, "Accept-Ranges": "bytes"}
+            if code == 206:
+                extra["Content-Range"] = f"bytes {start}-{end}/{size}"
+            self.headers_common(ctype, length, extra, "private, max-age=0")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            f.seek(start)
+            left = length
+            while left > 0:
+                buf = f.read(min(1024 * 1024, left))
+                if not buf:
+                    break
+                self.wfile.write(buf)
+                left -= len(buf)
+            if left == 0 and end == size - 1:
+                self.finished(dev, item)  # the phone now has the last byte
+
+    def finished(self, dev, item):
+        log("delivered", name=item["name"], to=self.hub.devices.get(dev, {}).get("name"))
+        self.hub.delivered(dev, item["id"])
+        self.hub.remember(dev, "down", item["kind"], item["name"], item.get("size", 0), item.get("text"))
+        self.hub.on_event("delivered", {"name": item["name"], "id": dev})
+
+    def send_zip(self, folder, disp, dev, item):
+        """A folder as a zip, streamed as it is made (length unknown: closing the connection ends it)."""
+        self.send_response(200)
+        self.headers_common("application/zip", None, {"Content-Disposition": disp, "Connection": "close"})
+        self.end_headers()
+        self.close_connection = True
+        if self.command == "HEAD":
+            return
+
+        class Out:  # write-only stream for ZipFile
+            def __init__(s, w):
+                s.w, s.n = w, 0
+
+            def write(s, b):
+                s.w.write(b)
+                s.n += len(b)
+                return len(b)
+
+            def tell(s):
+                return s.n
+
+            def flush(s):
+                s.w.flush()
+
+        base = os.path.dirname(folder.rstrip("/"))
+        with zipfile.ZipFile(Out(self.wfile), "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+            for root, _dirs, files in os.walk(folder):
+                for fn in files:
+                    full = os.path.join(root, fn)
+                    if os.path.isfile(full) and not os.path.islink(full):
+                        z.write(full, os.path.relpath(full, base))
+        self.finished(dev, item)
+
+    # ---- phone -> laptop (resumable)
+    def api_upload(self, method, dev, rest, query):
+        hub = self.hub
+        if method == "POST" and not rest:
+            b = self.json_body()
+            name, size = clean_name(b.get("name")), int(b.get("size", -1))
+            if size < 0:
+                raise ValueError("size")
+            with hub.lock:
+                pending = sum(u["size"] - len(u["chunks"]) * CHUNK for u in hub.uploads.values())
+                free = shutil.disk_usage(INBOX).free
+                if free - max(0, pending) - size < RESERVE:
+                    log("upload-refused", name=name, size=size, free=free)
+                    return self.reply(507, {"error": "disk", "free": free - RESERVE})
+                uid = secrets.token_hex(8)
+                total = (size + CHUNK - 1) // CHUNK
+                meta = {"id": uid, "device": dev, "name": name, "size": size, "total": total, "chunks": set(),
+                        "mtime": b.get("mtime"), "scan": bool(b.get("scan")), "part": os.path.join(INBOX, f".incoming-{uid}.part"),
+                        "touched": now(), "started": now()}
+                fd = os.open(meta["part"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.ftruncate(fd, size)  # reserves the length up front; chunks fill it in any order
+                os.close(fd)
+                hub.uploads[uid] = meta
+                hub.save_upload(meta)
+            hub.on_event("incoming", {"name": name, "size": size, "id": dev})
+            return self.reply(201, {"id": uid, "chunk": CHUNK, "total": total})
+        uid = rest[0] if rest else ""
+        meta = hub.uploads.get(uid)
+        if not meta or meta["device"] != dev:
+            return self.reply(404, {"error": "unknown upload"})
+        if method == "GET" and len(rest) == 1:
+            return self.reply(200, {"id": uid, "total": meta["total"], "have": sorted(meta["chunks"])})
+        if method == "DELETE" and len(rest) == 1:
+            with hub.lock:
+                hub.drop_upload(uid)
+            return self.reply(204)
+        if method == "PUT" and len(rest) == 2:
+            idx = int(rest[1])
+            if not 0 <= idx < meta["total"]:
+                raise ValueError("chunk index")
+            want = min(CHUNK, meta["size"] - idx * CHUNK)
+            n = int(self.headers.get("Content-Length") or -1)
+            if n != want:
+                raise ValueError("chunk length")
+            fd = os.open(meta["part"], os.O_WRONLY)
+            try:
+                off, left = idx * CHUNK, n
+                while left:
+                    buf = self.rfile.read(min(1024 * 1024, left))
+                    if not buf:
+                        raise ValueError("short body")
+                    os.pwrite(fd, buf, off)
+                    off += len(buf)
+                    left -= len(buf)
+            finally:
+                os.close(fd)
+            with hub.lock:
+                meta["chunks"].add(idx)
+                meta["touched"] = now()
+                hub.save_upload(meta)
+            hub.on_event("progress", {"name": meta["name"], "done": len(meta["chunks"]), "total": meta["total"], "id": dev})
+            return self.reply(200, {"have": len(meta["chunks"])})
+        if method == "POST" and rest[1:] == ["finish"]:
+            if meta.get("scan"):
+                return self.finish_scan(dev, uid, meta)
+            with hub.lock:
+                if len(meta["chunks"]) != meta["total"] or os.path.getsize(meta["part"]) != meta["size"]:
+                    return self.reply(409, {"error": "incomplete", "have": sorted(meta["chunks"])})
+                dest = unique_path(INBOX, meta["name"])
+                os.chmod(meta["part"], 0o644)
+                os.replace(meta["part"], dest)
+                if isinstance(meta.get("mtime"), (int, float)) and meta["mtime"] > 0:
+                    os.utime(dest, (now(), meta["mtime"] / 1000))
+                hub.drop_upload(uid, delete_part=False)
+            secs = max(0.001, now() - meta["started"])
+            log("received", name=os.path.basename(dest), size=meta["size"], frm=hub.devices[dev]["name"], secs=round(secs, 1))
+            hub.remember(dev, "up", "file", os.path.basename(dest), meta["size"])
+            hub.on_event("received", {"path": dest, "size": meta["size"], "id": dev})
+            return self.reply(200, {"saved": os.path.basename(dest)})
+        return self.reply(405, {"error": "method"})
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 32
+
+    def __init__(self, sock):
+        # adopt an already-bound socket (systemd) instead of binding
+        self.address_family = sock.family
+        super().__init__(("", PORT), Handler, bind_and_activate=False)
+        self.socket.close()
+        self.socket = sock
+        self.server_address = sock.getsockname()
+        self.ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        self.ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.ctx.load_cert_chain(os.path.join(TLS, "server.crt"), os.path.join(TLS, "server.key"))
+        self.ctx.set_alpn_protocols(["http/1.1"])
+
+    def finish_request(self, request, client_address):
+        # runs in the connection's own thread: the TLS handshake never blocks other phones
+        request.settimeout(15)
+        local = request.getsockname()[0]
+        if not Handler.hub.allowed_here(local):  # an untrusted network: say nothing at all
+            Handler.hub.refused(client_address[0].removeprefix("::ffff:"), local.removeprefix("::ffff:"))
+            return
+        try:
+            first = request.recv(1, socket.MSG_PEEK)
+            if not first:
+                return
+            if first == b"\x16":
+                request = self.ctx.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError) as e:
+            log("tls-fail", ip=client_address[0], err=str(e)[:100])
+            return
+        request.settimeout(120)
+        try:
+            self.RequestHandlerClass(request, client_address, self)
+        finally:
+            try:
+                request.close()
+            except OSError:
+                pass
+
+    def handle_error(self, request, client_address):
+        err = sys.exc_info()[1]
+        if not isinstance(err, (ConnectionError, ssl.SSLError, TimeoutError)):
+            log("error", ip=client_address[0], err=repr(err)[:200])
+
+
+def listening_socket():
+    """The socket systemd passed us (socket activation), or bind one ourselves."""
+    if os.environ.get("LISTEN_PID") == str(os.getpid()) and int(os.environ.get("LISTEN_FDS", "0")) >= 1:
+        return socket.socket(fileno=3)
+    s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    s.bind(("::", PORT))
+    s.listen(32)
+    return s
+
+
+# ---------------------------------------------------------------- D-Bus + desktop side
+IFACE_XML = """<node><interface name="io.arco.PhoneLink">
+  <method name="Send"><arg type="as" name="paths" direction="in"/><arg type="s" name="text" direction="in"/>
+    <arg type="s" name="device" direction="in"/><arg type="s" name="result" direction="out"/></method>
+  <method name="Status"><arg type="s" name="json" direction="out"/></method>
+  <method name="Pair"><arg type="s" name="url" direction="out"/></method>
+  <method name="Answer"><arg type="s" name="code" direction="in"/><arg type="b" name="allow" direction="in"/></method>
+  <method name="Open"><arg type="s" name="path" direction="in"/><arg type="b" name="folder" direction="in"/></method>
+  <method name="Networks"><arg type="s" name="json" direction="out"/></method>
+  <method name="SetAllowed"><arg type="s" name="uuid" direction="in"/><arg type="b" name="on" direction="in"/></method>
+  <method name="RecentScans"><arg type="i" name="pages" direction="out"/></method>
+  <method name="MakeScanPdf"><arg type="s" name="path" direction="out"/></method>
+  <method name="Lockouts"><arg type="s" name="json" direction="out"/></method>
+  <method name="Unlock"><arg type="s" name="ip" direction="in"/><arg type="b" name="ok" direction="out"/></method>
+  <method name="PhoneClips"><arg type="s" name="json" direction="out"/></method>
+  <method name="CopyText"><arg type="s" name="text" direction="in"/></method>
+  <method name="Revoke"><arg type="s" name="device" direction="in"/><arg type="b" name="ok" direction="out"/></method>
+  <signal name="Changed"><arg type="s" name="json"/></signal>
+  <signal name="Card"><arg type="s" name="json"/></signal>
+  <signal name="Uncard"><arg type="s" name="key"/></signal>
+  <signal name="Event"><arg type="s" name="kind"/><arg type="s" name="json"/></signal>
+</interface></node>"""
+
+
+class Desktop:
+    """D-Bus service, notifications, sounds, clipboard. Lives on the GLib main loop."""
+
+    def __init__(self, hub, loop):
+        from gi.repository import Gio, GLib
+        self.Gio, self.GLib = Gio, GLib
+        self.hub, self.loop = hub, loop
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.notes = {}  # notification id -> callback(action)
+        self.pair_notes = {}  # code -> notification id
+        self.batches = {}     # device id -> files arriving together
+        self.bus.signal_subscribe("org.freedesktop.Notifications", "org.freedesktop.Notifications", "ActionInvoked",
+                                  "/org/freedesktop/Notifications", None, Gio.DBusSignalFlags.NONE, self._on_action)
+        node = Gio.DBusNodeInfo.new_for_xml(IFACE_XML)
+        self.reg = self.bus.register_object(BUS_PATH, node.interfaces[0], self._on_call, None, None)
+        Gio.bus_own_name_on_connection(self.bus, BUS_NAME, Gio.BusNameOwnerFlags.NONE, None, None)
+        hub.on_event = lambda kind, data: GLib.idle_add(self._event, kind, data)
+
+    # ---- D-Bus methods
+    def _on_call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        GLib, hub = self.GLib, self.hub
+        hub.last_activity = now()
+        args = params.unpack()
+        if method == "Send":
+            paths, text, dev = args
+            res = hub.offer(list(paths), text, dev)
+            return invocation.return_value(GLib.Variant("(s)", (res,)))
+        if method == "Status":
+            return invocation.return_value(GLib.Variant("(s)", (json.dumps(hub.status()),)))
+        if method == "Pair":
+            code = secrets.token_urlsafe(16)
+            with hub.lock:
+                hub.pairs[code] = {"expires": now() + PAIR_TTL_S, "state": "new"}
+            log("pair-start")
+            return invocation.return_value(GLib.Variant("(s)", (f"http://{NAME_HOST}:{PORT}/p/{code}",)))
+        if method == "Answer":
+            code, allow = args
+            self._answer(code, allow)
+            return invocation.return_value(None)
+        if method == "Open":
+            path, folder = args
+            if os.path.realpath(path).startswith(os.path.realpath(INBOX) + os.sep):  # only files Dropline saved
+                self._open(path, folder)
+            return invocation.return_value(None)
+        if method == "Networks":
+            seen, out = set(), []
+            for ip, n in hub.networks(fresh=True).items():
+                if n["uuid"] not in seen:
+                    seen.add(n["uuid"])
+                    out.append({k: n[k] for k in ("uuid", "name", "type", "hotspot", "allowed")} | {"ip": ip})
+            return invocation.return_value(GLib.Variant("(s)", (json.dumps(out),)))
+        if method == "SetAllowed":
+            hub.set_allowed(args[0], bool(args[1]))
+            return invocation.return_value(None)
+        if method == "RecentScans":
+            return invocation.return_value(GLib.Variant("(i)", (len(recent_scans()),)))
+        if method == "MakeScanPdf":
+            self.pdf_in_background()
+            return invocation.return_value(GLib.Variant("(s)", ("",)))
+        if method == "Lockouts":
+            return invocation.return_value(GLib.Variant("(s)", (json.dumps(hub.lockouts()),)))
+        if method == "Unlock":
+            return invocation.return_value(GLib.Variant("(b)", (hub.unlock(args[0]),)))
+        if method == "PhoneClips":
+            clips = sorted(hub.all_phone_clips(), key=lambda c: -c["t"])
+            return invocation.return_value(GLib.Variant("(s)", (json.dumps(clips),)))
+        if method == "CopyText":
+            self._copy(args[0])
+            return invocation.return_value(None)
+        if method == "Revoke":
+            return invocation.return_value(GLib.Variant("(b)", (hub.revoke(args[0]),)))
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
+
+    def emit(self, signal, *args):
+        sig = "(s)" if signal == "Changed" else "(ss)"
+        self.bus.emit_signal(None, BUS_PATH, BUS_NAME, signal, self.GLib.Variant(sig, args))
+
+    # ---- events from the web side
+    def _event(self, kind, data):
+        hub = self.hub
+        data = dict(data or {})
+        if "id" in data:
+            data.setdefault("name", hub.devices.get(data["id"], {}).get("name", "Phone"))
+        name = data.get("name", "Phone")
+        self.emit("Event", kind, json.dumps({k: v for k, v in data.items() if k != "text"} | (
+            {"text": data["text"][:300]} if "text" in data else {})))
+        if kind == "phone-clip":
+            return False
+        if kind == "link":
+            self.outside(["xdg-open", data["url"]])
+        if kind == "scan":
+            self._open(data["path"], False)
+        if kind == "make-pdf":
+            self._scan_action("pdf", "")
+            return False
+        if kind in ("connected", "disconnected", "paired", "changed", "delivered"):
+            self.emit("Changed", json.dumps(hub.status()))
+        if kind == "text":
+            self._copy(data["text"])
+        self.policy(kind, data, name)
+        return False
+
+    # ---- smart cards: few, grouped, quiet in Do Not Disturb, gone once they are answered elsewhere
+    def policy(self, kind, data, name):
+        urgent = kind in ("pair-request", "locked")
+        if not urgent and self.quiet():
+            return
+        if kind == "pair-request":
+            if self.owned("io.arco.PhoneLinkPair"):   # the Dropline window already asks
+                return
+            self.card({"key": "pair:" + data["code"], "title": f"Pair {name}?", "body": "Allow only if this is your phone.",
+                       "timeout": PAIR_TTL_S, "actions": [self.act("Allow", True, "Answer", "(sb)", [data["code"], True]),
+                                                           self.act("Deny", False, "Answer", "(sb)", [data["code"], False])]},
+                      fallback=lambda: self.pair_notes.__setitem__(data["code"], self.notify(
+                          f"Pair {name}?", "Allow only if this is your phone.", ["allow", "Allow", "deny", "Deny"], urgent=True,
+                          cb=lambda a, c=data["code"]: self._answer(c, a == "allow"))))
+        elif kind == "paired":
+            self.chime("device-added")
+            self.card({"key": "paired", "title": f"{name} paired", "body": "Drops at the screen edge now go straight to it.", "timeout": 5})
+        elif kind == "connected":
+            last = self.hub.devices.get(data.get("id"), {}).get("away_since")
+            if last is None or now() - last > 30 * 60:   # back after a while: one soft sound, no card
+                self.chime("device-added")
+        elif kind == "disconnected":
+            d = self.hub.devices.get(data.get("id"))
+            if d is not None:
+                d["away_since"] = now()
+        elif kind == "received":
+            self.batch_received(data, name)
+        elif kind == "text":
+            self.card({"key": "text", "title": f"Copied from {name}", "body": data["text"].split("\n")[0][:90], "timeout": 3})
+        elif kind == "link":
+            self.card({"key": "link", "title": f"Opened a link from {name}", "body": data["url"][:120], "timeout": 5,
+                       "actions": [self.act("Copy link", False, "CopyText", "(s)", [data["url"]])]})
+        elif kind == "scan":
+            self.chime("camera-shutter")
+            n = data.get("pages", 1)
+            self.card({"key": "scan", "title": f"Scan · page {n}" if n > 1 else "Scan", "body": "Opened on screen · more pages join the same PDF",
+                       "timeout": 10, "actions": [self.act(f"Make PDF ({n})" if n > 1 else "Make PDF", True, "MakeScanPdf", None, None),
+                                                  self.act("Show in folder", False, "Open", "(sb)", [data["path"], True])]})
+        elif kind == "locked":
+            self.card({"key": "locked:" + data["ip"], "title": "Dropline blocked a device", "timeout": 30,
+                       "body": f"{data['ip']} sent 5 wrong keys · blocked for 10 min",
+                       "actions": [self.act("Unblock", False, "Unlock", "(s)", [data["ip"]])]})
+
+    def batch_received(self, data, name):
+        """Files that arrive within a few seconds of each other share one card."""
+        dev = data.get("id")
+        b = self.batches.setdefault(dev, {"paths": [], "timer": 0})
+        b["paths"].append(data["path"])
+        if b["timer"]:
+            self.GLib.source_remove(b["timer"])
+        b["timer"] = self.GLib.timeout_add(1500, self._flush_received, dev, name)
+
+    def _flush_received(self, dev, name):
+        b = self.batches.pop(dev, None)
+        if not b:
+            return False
+        paths = b["paths"]
+        self.chime("complete")
+        if len(paths) == 1:
+            p = paths[0]
+            img = (mimetypes.guess_type(p)[0] or "").startswith("image/")
+            self.card({"key": "recv:" + dev, "title": os.path.basename(p), "body": f"From {name} · in Downloads/Dropline", "timeout": 6,
+                       "thumb": p if img else None,
+                       "actions": [self.act("Open", True, "Open", "(sb)", [p, False]), self.act("Show in folder", False, "Open", "(sb)", [p, True])]})
+        else:
+            self.card({"key": "recv:" + dev, "title": f"{len(paths)} files from {name}", "body": "In Downloads/Dropline", "timeout": 6,
+                       "actions": [self.act("Show in folder", True, "Open", "(sb)", [paths[-1], True])]})
+        return False
+
+    @staticmethod
+    def act(label, primary, method, sig, args):
+        return {"label": label, "primary": primary, "method": method, "sig": sig, "args": args}
+
+    def card(self, spec, fallback=None):
+        if self.shell_cards():
+            self.bus.emit_signal(None, BUS_PATH, BUS_NAME, "Card", self.GLib.Variant("(s)", (json.dumps(spec),)))
+        elif fallback:
+            fallback()
+        else:
+            self.notify(spec["title"], spec.get("body", ""), [], transient=True)
+
+    def uncard(self, key):
+        self.bus.emit_signal(None, BUS_PATH, BUS_NAME, "Uncard", self.GLib.Variant("(s)", (key,)))
+
+    def quiet(self):
+        """Do Not Disturb is on."""
+        try:
+            return not self.Gio.Settings.new("org.gnome.desktop.notifications").get_boolean("show-banners")
+        except Exception:
+            return False
+
+    def owned(self, name):
+        try:
+            res = self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+                                     self.GLib.Variant("(s)", (name,)), None, self.Gio.DBusCallFlags.NONE, 1000, None)
+            return res.unpack()[0]
+        except self.GLib.Error:
+            return False
+
+    def shell_cards(self):
+        """True when the GNOME Shell extension is there to draw Dropline cards."""
+        try:
+            res = self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
+                                     self.GLib.Variant("(s)", (SHELL_CARDS,)), None, self.Gio.DBusCallFlags.NONE, 1000, None)
+            return res.unpack()[0]
+        except self.GLib.Error:
+            return False
+
+    def pdf_in_background(self):
+        """OCR takes a few seconds a page: do it off the main loop, then open the PDF."""
+        if getattr(self, "_pdf_busy", False):
+            return
+        n = len(recent_scans())
+        if not n:
+            return
+        self._pdf_busy = True
+        self.card({"key": "pdf", "title": f"Making a searchable PDF · {n} page{'s' if n > 1 else ''}",
+                   "body": "Reading the text so you can search and copy it", "timeout": 120})
+
+        def job():
+            try:
+                pdf = make_scan_pdf(self.hub)
+            except Exception as e:
+                log("scan-pdf-failed", err=repr(e)[:160])
+                pdf = None
+            self.GLib.idle_add(done, pdf)
+
+        def done(pdf):
+            self._pdf_busy = False
+            self.uncard("pdf")
+            if pdf:
+                self._open(pdf, False)
+                self.card({"key": "pdf", "title": os.path.basename(pdf), "body": "Searchable PDF · in Downloads/Dropline/Scans", "timeout": 6,
+                           "actions": [self.act("Show in folder", False, "Open", "(sb)", [pdf, True])]})
+            return False
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _scan_action(self, action, path):
+        if action == "pdf":
+            self.pdf_in_background()
+        elif action == "folder":
+            self._open(path, True)
+
+    def _answer(self, code, allow):
+        hub = self.hub
+        with hub.lock:
+            p = hub.pairs.get(code)
+            if p and p["state"] == "waiting":
+                p["state"] = "allowed" if allow else "denied"
+                log("pair-" + p["state"], name=p.get("name"))
+        nid = self.pair_notes.pop(code, None)
+        if nid:
+            self._close_note(nid)
+        self.uncard("pair:" + code)
+
+    # ---- notifications
+    def notify(self, summary, body, actions, urgent=False, transient=False, cb=None, image=None):
+        GLib = self.GLib
+        hints = {"urgency": GLib.Variant("y", 2 if urgent else 1), "desktop-entry": GLib.Variant("s", "phone-link"),
+                 "category": GLib.Variant("s", "device")}
+        if transient:
+            hints["transient"] = GLib.Variant("b", True)
+        if urgent:
+            hints["resident"] = GLib.Variant("b", True)
+        if image and os.path.isfile(image) and (mimetypes.guess_type(image)[0] or "").startswith("image/"):
+            hints["image-path"] = GLib.Variant("s", "file://" + image)
+        try:
+            res = self.bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                     "org.freedesktop.Notifications", "Notify",
+                                     GLib.Variant("(susssasa{sv}i)", ("Dropline", 0, "phone-symbolic", summary, body,
+                                                                       actions, hints, 0 if urgent else -1)),
+                                     None, self.Gio.DBusCallFlags.NONE, 3000, None)
+        except GLib.Error:
+            return 0
+        nid = res.unpack()[0]
+        if cb:
+            self.notes[nid] = cb
+        return nid
+
+    def _close_note(self, nid):
+        try:
+            self.bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                               "org.freedesktop.Notifications", "CloseNotification", self.GLib.Variant("(u)", (nid,)),
+                               None, self.Gio.DBusCallFlags.NONE, 2000, None)
+        except self.GLib.Error:
+            pass
+
+    def _on_action(self, _c, _s, _p, _i, _sig, params):
+        nid, action = params.unpack()
+        cb = self.notes.pop(nid, None)
+        if cb:
+            cb(action)
+
+    # ---- small desktop actions
+    def chime(self, sound):
+        try:
+            self.Gio.Subprocess.new(["canberra-gtk-play", "-i", sound], self.Gio.SubprocessFlags.STDERR_SILENCE)
+        except self.GLib.Error:
+            pass
+
+    def outside(self, argv, stdin=None):
+        """Run a desktop helper in its own transient unit, so it outlives this service
+        (wl-copy keeps serving the clipboard; an opened app is not inside our sandbox)."""
+        flags = self.Gio.SubprocessFlags.STDIN_PIPE if stdin is not None else self.Gio.SubprocessFlags.NONE
+        try:
+            p = self.Gio.Subprocess.new(["systemd-run", "--user", "--collect", "--quiet"] + (["--pipe"] if stdin is not None else []) + argv, flags)
+            if stdin is not None:
+                p.communicate_utf8_async(stdin, None, None, None)
+        except self.GLib.Error:
+            pass
+
+    def _copy(self, text):
+        self.outside(["wl-copy"], stdin=text)
+
+    def _open(self, path, folder):
+        f = self.Gio.File.new_for_path(path)
+        try:
+            if folder:
+                self.bus.call_sync("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                                   "org.freedesktop.FileManager1", "ShowItems",
+                                   self.GLib.Variant("(ass)", ([f.get_uri()], "")), None, self.Gio.DBusCallFlags.NONE, 3000, None)
+            else:
+                self.outside(["xdg-open", f.get_uri()])
+        except self.GLib.Error:
+            pass
+
+    # ---- idle exit
+    def check_idle(self):
+        hub = self.hub
+        hub.expire()
+        if not hub.busy() and now() - hub.last_activity > IDLE_EXIT_S:
+            log("idle-exit")
+            self.loop.quit()
+            return False
+        return True
+
+
+def serve():
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import GLib
+    hub = Hub()
+    Handler.hub = hub
+    httpd = Server(listening_socket())
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True).start()
+    loop = GLib.MainLoop()
+    desk = Desktop(hub, loop)
+    GLib.timeout_add_seconds(60, desk.check_idle)
+    try:  # GLib >= 2.80 moved this to GLibUnix
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, 15, lambda: (loop.quit(), False)[1])
+    except (ImportError, ValueError):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15, lambda: (loop.quit(), False)[1])
+    log("start", pid=os.getpid())
+    loop.run()
+    httpd.shutdown()
+
+
+# ---------------------------------------------------------------- command line
+def bus_call(method, args=None, sig=None):
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    res = bus.call_sync(BUS_NAME, BUS_PATH, BUS_NAME, method, GLib.Variant(sig, args) if sig else None,
+                        None, Gio.DBusCallFlags.NONE, 10000, None)
+    return res.unpack() if res else None
+
+
+# the certificate authority may only vouch for these (all private address ranges) and *.local
+PRIVATE_NETS = "permitted;IP:10.0.0.0/255.0.0.0,permitted;IP:172.16.0.0/255.240.0.0,permitted;IP:192.168.0.0/255.255.0.0"  # leak-check: ok
+
+
+def init_tls(force=False):
+    """This laptop's own certificate authority, limited by name constraints to private addresses and
+    .local names (so it can never vouch for a real website), and a server certificate for the
+    hotspot address and <hostname>.local. Nothing is ever shared between laptops."""
+    import subprocess
+    import tempfile
+    if not force and os.path.exists(os.path.join(TLS, "ca.crt")) and os.path.exists(os.path.join(TLS, "server.crt")):
+        print("certificates already exist in", TLS)
+        return
+    os.makedirs(TLS, mode=0o700, exist_ok=True)
+    host = socket.gethostname()
+    old = os.umask(0o077)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            ca_cnf, srv_cnf = os.path.join(tmp, "ca.cnf"), os.path.join(tmp, "srv.cnf")
+            with open(ca_cnf, "w") as f:
+                f.write(f"""[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=Dropline ({host})\nO=Dropline\n[v3_ca]
+basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash
+nameConstraints=critical,{PRIVATE_NETS},permitted;DNS:local\n""")
+            with open(srv_cnf, "w") as f:
+                f.write(f"""[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN={HOTSPOT_IP}\n[v3]
+basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth
+subjectAltName=IP:{HOTSPOT_IP},DNS:{host}.local,DNS:{host.lower()}.local\nauthorityKeyIdentifier=keyid\n""")
+            T = lambda n: os.path.join(TLS, n)  # noqa: E731
+            run = lambda *a: subprocess.run(a, check=True, capture_output=True)  # noqa: E731
+            run("openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", T("ca.key"))
+            run("openssl", "req", "-x509", "-new", "-key", T("ca.key"), "-sha256", "-days", "3650", "-config", ca_cnf,
+                "-extensions", "v3_ca", "-out", T("ca.crt"))
+            run("openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", T("server.key"))
+            csr = os.path.join(tmp, "server.csr")
+            run("openssl", "req", "-new", "-key", T("server.key"), "-config", srv_cnf, "-out", csr)
+            run("openssl", "x509", "-req", "-in", csr, "-CA", T("ca.crt"), "-CAkey", T("ca.key"), "-CAcreateserial",
+                "-sha256", "-days", "397", "-extfile", srv_cnf, "-extensions", "v3", "-out", T("server.crt"))
+            run("openssl", "x509", "-in", T("ca.crt"), "-outform", "DER", "-out", T("ca.der"))
+            os.chmod(T("ca.crt"), 0o644)
+            os.chmod(T("ca.der"), 0o644)
+    finally:
+        os.umask(old)
+    print("made a new certificate authority and server certificate in", TLS)
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    if cmd == "serve":
+        return serve()
+    if cmd == "init":
+        return init_tls(force="--force" in argv)
+    if cmd == "send":
+        print(bus_call("Send", ([os.path.abspath(p) for p in argv[2:]], "", ""), "(asss)")[0])
+        return
+    if cmd == "status":
+        print(json.dumps(json.loads(bus_call("Status")[0]), indent=2))
+        return
+    if cmd == "revoke" and len(argv) == 3:
+        print("revoked" if bus_call("Revoke", (argv[2],), "(s)")[0] else "no such phone")
+        return
+    if cmd == "pair":
+        os.execv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "phone-link-pair"), ["phone-link-pair"])
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,380 @@
+#!/usr/bin/python3 -I
+"""Dropline window: your paired phones (battery, connected, remove), the phone's clipboard history, and pairing
+with a one-time QR code (2 minutes) answered with Allow / Deny right here.
+
+Talks to the Phone Link service over D-Bus (io.arco.PhoneLink), which starts it if needed.
+"""
+import json
+import os
+import subprocess
+import tempfile
+import time
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+
+BUS, PATH = "io.arco.PhoneLink", "/io/arco/PhoneLink"
+TTL = 120
+
+CSS = b"""
+window.pl { background: linear-gradient(#34302b, #1b1816 70%, #0c0b0a); color: #efe9e2; }
+window.pl headerbar { background: transparent; box-shadow: none; border: none; min-height: 34px; }
+window.pl headerbar windowcontrols button { min-width: 22px; min-height: 22px; padding: 0; margin: 0 2px; color: rgba(239,233,226,.6); background: none; }
+window.pl headerbar windowcontrols button:hover { background: rgba(239,233,226,.12); color: #efe9e2; }
+.pl .caps { font-size: 10px; letter-spacing: 3.4px; font-weight: 600; color: rgba(239,233,226,.46); }
+.pl .title { font-size: 28px; font-weight: 200; color: #d9d2ca; }
+.pl .qr { background: #efe9e2; padding: 14px; }
+.pl .horizon { min-height: 2px; background: linear-gradient(90deg, transparent 15%, #ff2d55 55%, #dc143c);
+  box-shadow: 0 0 8px rgba(255,45,85,.8), 0 0 22px rgba(220,20,60,.45); }
+.pl .horizon.dark { background: rgba(255,255,255,.06); box-shadow: none; }
+.pl .found { font-size: 12px; letter-spacing: 5px; color: #ffd9df; font-weight: 500; }
+.pl button.word { background: none; border: none; box-shadow: none; padding: 8px 0; font-size: 11px; letter-spacing: 3px; font-weight: 600; color: rgba(239,233,226,.7); }
+.pl button.word.red { color: #ff2d55; }
+.pl button.word:hover { color: #efe9e2; }
+.pl .body { font-size: 13.5px; color: rgba(239,233,226,.62); }
+.pl .dev { padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,.05); }
+.pl .dev-name { font-size: 14px; font-weight: 600; color: #efe9e2; }
+.pl .dev-sub { font-size: 12px; color: rgba(239,233,226,.55); }
+.pl .dot-on { color: #4cc38a; } .pl .dot-off { color: rgba(239,233,226,.35); }
+.pl button.pill { background: #dc143c; color: #fff; border-radius: 12px; padding: 10px 16px; font-weight: 600; box-shadow: none; border: none; }
+.pl button.pill:hover { background: #ef2350; }
+.pl button.ghost { background: rgba(255,255,255,.07); color: #efe9e2; border-radius: 10px; padding: 6px 12px; box-shadow: none; border: none; font-size: 12px; }
+.pl button.ghost:hover { background: rgba(255,255,255,.13); }
+.pl switch:checked { background: #dc143c; }
+"""
+
+
+class PairWindow(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="Dropline", resizable=False)
+        self.add_css_class("pl")
+        bar = Gtk.HeaderBar(show_title_buttons=True, decoration_layout=":minimize,close")
+        bar.set_title_widget(Gtk.Box())
+        self.set_titlebar(bar)
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.code = None
+        self.left = TTL
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.set_margin_start(30)
+        box.set_margin_end(30)
+        box.set_margin_bottom(26)
+        self.set_child(box)
+        self.kicker = self.label("DROPLINE · PAIRING", "caps")
+        box.append(self.kicker)
+        self.title = self.label("Scan with your phone", "title")
+        self.title.set_margin_top(6)
+        box.append(self.title)
+        self.sub = self.label("Phone on the hotspot first. One time only: after this the Laptop icon on the phone just works.", "body")
+        self.sub.set_wrap(True)
+        self.sub.set_max_width_chars(34)
+        self.sub.set_margin_top(8)
+        box.append(self.sub)
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, margin_top=22, margin_bottom=22)
+        self.pic = Gtk.Picture(can_shrink=False, halign=Gtk.Align.CENTER)
+        frame = Gtk.Box(halign=Gtk.Align.CENTER)
+        frame.add_css_class("qr")
+        frame.append(self.pic)
+        self.stack.add_named(frame, "qr")
+        ask = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.CENTER)
+        self.ask_name = self.label("", "title")
+        ask.append(self.label("WANTS TO PAIR", "caps"))
+        ask.append(self.ask_name)
+        row = Gtk.Box(spacing=28, margin_top=14)
+        allow = Gtk.Button(label="ALLOW")
+        allow.add_css_class("word")
+        allow.add_css_class("red")
+        allow.connect("clicked", lambda *_: self.answer(True))
+        deny = Gtk.Button(label="DENY")
+        deny.add_css_class("word")
+        deny.connect("clicked", lambda *_: self.answer(False))
+        row.append(allow)
+        row.append(deny)
+        ask.append(row)
+        self.stack.add_named(ask, "ask")
+        self.found = self.label("", "found")
+        self.found.set_valign(Gtk.Align.CENTER)
+        self.stack.add_named(self.found, "found")
+        self.devbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        devpage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        devpage.append(self.devbox)
+        self.lockhead = self.label("BLOCKED DEVICES", "caps")
+        self.lockbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        devpage.append(self.lockhead)
+        devpage.append(self.lockbox)
+        self.scanrow = Gtk.Box(spacing=10)
+        self.scanrow.add_css_class("dev")
+        sc = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        self.scantitle = self.label("", "dev-name")
+        sc.append(self.scantitle)
+        sc.append(self.label("Scans from the last 15 minutes, in order", "dev-sub"))
+        self.scanrow.append(sc)
+        pdf = Gtk.Button(label="Make PDF", valign=Gtk.Align.CENTER)
+        pdf.add_css_class("pill")
+        pdf.connect("clicked", lambda *_: (self.call("MakeScanPdf"), self.show_scans()))
+        self.scanrow.append(pdf)
+        devpage.append(self.scanrow)
+        devpage.append(self.label("NETWORKS", "caps"))
+        self.netbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        devpage.append(self.netbox)
+        devpage.append(self.label("PHONE CLIPBOARD", "caps"))
+        self.clipbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        clipscroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, max_content_height=230, propagate_natural_height=True)
+        clipscroll.set_child(self.clipbox)
+        devpage.append(clipscroll)
+        add = Gtk.Button(label="Pair a new phone", halign=Gtk.Align.START)
+        add.add_css_class("pill")
+        add.connect("clicked", lambda *_: self.new_code())
+        devpage.append(add)
+        self.stack.add_named(devpage, "devices")
+        self.stack.set_size_request(300, 260)
+        box.append(self.stack)
+
+        self.line = Gtk.Box()
+        self.line.add_css_class("horizon")
+        self.line.add_css_class("dark")
+        box.append(self.line)
+        foot = Gtk.Box(margin_top=10)
+        self.timer = self.label("", "caps")
+        self.timer.set_hexpand(True)
+        foot.append(self.timer)
+        self.again = Gtk.Button(label="NEW CODE", visible=False)
+        self.again.add_css_class("word")
+        self.again.add_css_class("red")
+        self.again.connect("clicked", lambda *_: self.new_code())
+        foot.append(self.again)
+        box.append(foot)
+
+        self.bus.signal_subscribe(BUS, BUS, "Event", PATH, None, Gio.DBusSignalFlags.NONE, self.on_event)
+        self.bus.signal_subscribe(BUS, BUS, "Changed", PATH, None, Gio.DBusSignalFlags.NONE,
+                                  lambda *a: self.show_devices(json.loads(a[5].unpack()[0])) if self.stack.get_visible_child_name() == "devices" else None)
+        st = self.status()
+        if st and st.get("devices") and not os.environ.get("DROPLINE_PAIR"):
+            self.show_devices(st)
+        else:
+            self.new_code()
+        GLib.timeout_add_seconds(1, self.tick)
+
+    @staticmethod
+    def label(text, cls):
+        lab = Gtk.Label(label=text, xalign=0)
+        lab.add_css_class(cls)
+        return lab
+
+    def call(self, method, args=None, sig=None):
+        res = self.bus.call_sync(BUS, PATH, BUS, method, GLib.Variant(sig, args) if sig else None,
+                                 None, Gio.DBusCallFlags.NONE, 10000, None)
+        return res.unpack() if res else None
+
+    def status(self):
+        try:
+            return json.loads(self.call("Status")[0])
+        except (GLib.Error, ValueError):
+            return None
+
+    def show_devices(self, st):
+        self.kicker.set_text("DROPLINE")
+        self.title.set_text("Your phones")
+        self.sub.set_text("Drop files on the phone at the screen edge, or use the Dropline app on the phone.")
+        self.timer.set_text("")
+        self.again.set_visible(False)
+        self.line.remove_css_class("dark") if any(d.get("connected") for d in st.get("devices", [])) else self.line.add_css_class("dark")
+        while (c := self.devbox.get_first_child()):
+            self.devbox.remove(c)
+        for d in st.get("devices", []):
+            row = Gtk.Box(spacing=12)
+            row.add_css_class("dev")
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            col.append(self.label(d["name"], "dev-name"))
+            if d.get("connected"):
+                bat = d.get("battery")
+                sub = "Connected" + (f" · {round(bat * 100)}%" if isinstance(bat, (int, float)) else "")
+            else:
+                mins = int((time.time() - (d.get("seen") or 0)) / 60)
+                sub = "Last seen " + ("just now" if mins < 1 else f"{mins} min ago" if mins < 60 else f"{mins // 60} h ago" if mins < 1440 else f"{mins // 1440} d ago")
+            col.append(self.label(("● " if d.get("connected") else "○ ") + sub, "dev-sub"))
+            row.append(col)
+            rm = Gtk.Button(label="Remove", valign=Gtk.Align.CENTER)
+            rm.add_css_class("ghost")
+            rm.connect("clicked", lambda _b, dev=d["id"], name=d["name"]: self.revoke(dev, name))
+            row.append(rm)
+            self.devbox.append(row)
+        if not st.get("devices"):
+            self.devbox.append(self.label("No phones paired yet.", "body"))
+        self.show_lockouts()
+        self.show_scans()
+        self.show_networks()
+        self.show_clips()
+        self.stack.set_visible_child_name("devices")
+
+    def show_lockouts(self):
+        while (c := self.lockbox.get_first_child()):
+            self.lockbox.remove(c)
+        try:
+            locks = json.loads(self.call("Lockouts")[0])
+        except (GLib.Error, ValueError):
+            locks = []
+        self.lockhead.set_visible(bool(locks))
+        for l in locks:
+            row = Gtk.Box(spacing=10)
+            row.add_css_class("dev")
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            col.append(self.label(l["ip"], "dev-name"))
+            col.append(self.label(f"5 wrong keys · unblocks by itself in {l['minutes_left']} min", "dev-sub"))
+            row.append(col)
+            btn = Gtk.Button(label="Unblock", valign=Gtk.Align.CENTER)
+            btn.add_css_class("ghost")
+            btn.connect("clicked", lambda _b, ip=l["ip"]: (self.call("Unlock", (ip,), "(s)"), self.show_lockouts()))
+            row.append(btn)
+            self.lockbox.append(row)
+
+    def show_scans(self):
+        try:
+            n = self.call("RecentScans")[0]
+        except GLib.Error:
+            n = 0
+        self.scanrow.set_visible(n > 0)
+        self.scantitle.set_text(f"{n} scanned page{'s' if n != 1 else ''}")
+
+    def show_networks(self):
+        while (c := self.netbox.get_first_child()):
+            self.netbox.remove(c)
+        try:
+            nets = json.loads(self.call("Networks")[0])
+        except (GLib.Error, ValueError):
+            nets = []
+        for n in sorted(nets, key=lambda n: not n["hotspot"]):
+            row = Gtk.Box(spacing=10)
+            row.add_css_class("dev")
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+            col.append(self.label(n["name"], "dev-name"))
+            kind = "Laptop hotspot · always on" if n["hotspot"] else ("Wi-Fi" if n["type"] == "802-11-wireless" else "Cable")
+            col.append(self.label(kind + ("" if n["hotspot"] else (" · Dropline works here" if n["allowed"] else " · Blocked")), "dev-sub"))
+            row.append(col)
+            if not n["hotspot"]:
+                sw = Gtk.Switch(active=n["allowed"], valign=Gtk.Align.CENTER, tooltip_text="Paired phones on this network can reach Dropline (pairing new phones only works on the hotspot)")
+                sw.connect("notify::active", lambda w, _p, u=n["uuid"]: (self.call("SetAllowed", (u, w.get_active()), "(sb)"), self.show_networks()))
+                row.append(sw)
+            self.netbox.append(row)
+        if not nets:
+            self.netbox.append(self.label("Not connected to any network.", "dev-sub"))
+
+    def show_clips(self):
+        while (c := self.clipbox.get_first_child()):
+            self.clipbox.remove(c)
+        try:
+            clips = json.loads(self.call("PhoneClips")[0])[:12]
+        except (GLib.Error, ValueError):
+            clips = []
+        if not clips:
+            self.clipbox.append(self.label("Text you copy on the phone shows up here the next time you open Dropline there.", "dev-sub"))
+            return
+        for c in clips:
+            row = Gtk.Box(spacing=10)
+            row.add_css_class("dev")
+            text = " ".join(c["text"].split())
+            lab = self.label(text, "dev-name")
+            lab.set_ellipsize(3)
+            lab.set_max_width_chars(34)
+            lab.set_hexpand(True)
+            lab.set_tooltip_text(c["text"][:500])
+            row.append(lab)
+            btn = Gtk.Button(label="Copy", valign=Gtk.Align.CENTER)
+            btn.add_css_class("ghost")
+            btn.connect("clicked", lambda b, t=c["text"]: (self.call("CopyText", (t,), "(s)"), b.set_label("Copied")))
+            row.append(btn)
+            self.clipbox.append(row)
+
+    def revoke(self, dev, name):
+        try:
+            self.call("Revoke", (dev,), "(s)")
+        except GLib.Error:
+            return
+        st = self.status()
+        if st:
+            self.show_devices(st)
+
+    def new_code(self):
+        try:
+            url = self.call("Pair")[0]
+        except GLib.Error as e:
+            self.sub.set_text("Dropline is not running: " + e.message)
+            return
+        self.code = url.rsplit("/", 1)[1]
+        png = os.path.join(tempfile.gettempdir(), f"phone-link-pair-{os.getpid()}.png")
+        subprocess.run(["qrencode", "-s", "8", "-m", "0", "--foreground=0c0b0a", "--background=efe9e2", "-o", png, url], check=True)
+        self.pic.set_file(Gio.File.new_for_path(png))
+        self.left = TTL
+        self.again.set_visible(False)
+        self.kicker.set_text("DROPLINE · PAIRING")
+        self.title.set_text("Scan with your phone")
+        self.sub.set_text("Phone on the hotspot first. One time only: after this the Dropline app on the phone just works.")
+        self.pic.set_opacity(1)
+        self.stack.set_visible_child_name("qr")
+        self.line.add_css_class("dark")
+
+    def tick(self):
+        if self.stack.get_visible_child_name() == "qr":
+            self.left -= 1
+            if self.left > 0:
+                self.timer.set_text(f"CODE ENDS IN {self.left // 60}:{self.left % 60:02d}")
+            else:
+                self.timer.set_text("CODE EXPIRED")
+                self.again.set_visible(True)
+                self.pic.set_opacity(0.15)
+                return True
+            self.pic.set_opacity(1)
+        return True
+
+    def on_event(self, _c, _s, _p, _i, _sig, params):
+        kind, data = params.unpack()
+        data = json.loads(data or "{}")
+        if kind == "scan" and self.stack.get_visible_child_name() == "devices":
+            self.show_scans()
+            return
+        if kind == "phone-clip" and self.stack.get_visible_child_name() == "devices":
+            self.show_clips()
+            return
+        if kind == "pair-request" and data.get("code") == self.code:
+            self.ask_name.set_text(data.get("name", "Phone"))
+            self.title.set_text("Is this your phone?")
+            self.stack.set_visible_child_name("ask")
+            self.line.remove_css_class("dark")
+            self.present()
+        elif kind == "paired":
+            self.title.set_text(data.get("name", "Phone"))
+            self.found.set_text("I  FOUND  YOU")
+            self.stack.set_visible_child_name("found")
+            self.timer.set_text("PAIRED")
+            self.line.remove_css_class("dark")
+            GLib.timeout_add(2400, lambda: (self.show_devices(self.status() or {}), False)[1])
+
+    def answer(self, allow):
+        try:
+            self.call("Answer", (self.code, allow), "(sb)")
+        except GLib.Error:
+            pass
+        if not allow:
+            self.title.set_text("Denied")
+            self.timer.set_text("NO PHONE WAS PAIRED")
+            GLib.timeout_add(1400, self.close)
+        else:
+            self.title.set_text("Linking")
+
+
+class App(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="io.arco.PhoneLinkPair")
+
+    def do_activate(self):
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        (self.props.active_window or PairWindow(self)).present()
+
+
+if __name__ == "__main__":
+    App().run([])

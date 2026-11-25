@@ -16,7 +16,7 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 
 | Owner | Features |
 |---|---|
-| arco | 38 features, 18 third-party extensions, 9 system steps |
+| arco | 44 features, 18 third-party extensions, 9 system steps |
 | sagar | 16 features, 1 third-party extensions, 6 system steps |
 
 ## arco
@@ -29,12 +29,14 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 | **click-ripple** | A soft crimson ring ripples out from the pointer on every click (white for right click), with a small dot while the button is held. | `extensions/custom/click-ripple@arco` |
 | **docker-toggle** | Docker on demand: docker-toggle on / off / status | `bin/docker-toggle`<br>`system/sudoers/docker-toggle` |
 | **dot-badges** | Shows a small red dot instead of a number when an app in the dock has notifications (Android style). | `extensions/custom/dot-badges@arco` |
+| **dropline** | Cards for Dropline (pair requests, phone connected, files received) and the laptop side of clipboard sync. The Dropline service is ~/.local/bin/phone-link. | `extensions/custom/dropline@arco` |
 | **dust-delete** | When you move a file to the Trash from Files, it crumbles into dust and drifts away, like deleting a message in Telegram. | `extensions/custom/dust-delete@arco` |
 | **file-finder** | File Finder - one box for files, apps and commands (Super+F) | `bin/file-finder`<br>`autostart/file-finder.desktop` |
 | **finder-timer** | Shows File Finder timers (> timer 25) as a countdown in the top bar, next to the clock. Click it to see or cancel them. Rings with a notification and sound when one ends, even after a logout. | `extensions/custom/finder-timer@arco` |
 | **fix-audio** | Fix sound when it stops working (e.g. "Dummy Output") | `bin/fix-audio`<br>`applications/fix-audio.desktop`<br>`systemd/user/fix-audio-login.service` |
 | **headphone-magic** | Headphone magic: pause music when headphones are unplugged, resume it when | `bin/headphone-magic`<br>`systemd/user/headphone-magic.service` |
 | **hotspot** | Mobile hotspot: hotspot on/off. Turns Wi-Fi on first if it's off | `bin/hotspot` |
+| **hotspot-band** | Hotspot radio band: hotspot-band fast / range / status | `bin/hotspot-band` |
 | **hotspot-devices** | Android-style Hotspot tile in Quick Settings: turn the hotspot on/off, Stay awake switch, see connected devices, kick or block them, and unblock or forget them later. Uses /usr/local/sbin/hotspot-guard. | `extensions/custom/hotspot-devices@arco`<br>`bin/hotspot-devices` |
 | **hotspot-guard** | Let @USER@ see hotspot devices and block / kick / unblock / untrust them without a password | `system/sudoers/hotspot-guard` |
 | **login-sound** | Soft startup sound (I Found You theme) | `autostart/login-sound.desktop` |
@@ -42,7 +44,11 @@ blocks) is always installed. Settings for extensions you skip stay harmlessly un
 | **ocr-copy** | Drag over any area of the screen; the text in it is copied to the clipboard | `bin/ocr-copy` |
 | **organize-downloads** | Sort files in ~/Downloads into folders. Usage: organize-downloads [--dry-run] | `bin/organize-downloads`<br>`systemd/user/organize-downloads.path`<br>`systemd/user/organize-downloads.service`<br>`systemd/user/organize-downloads.timer` |
 | **phone-drop** | Phone Drop - send files to your phone, or get files from it, by scanning a QR code | `bin/phone-drop`<br>`config/nautilus-scripts/Send to phone` |
+| **phone-drop-toggle** | Phone Drop quick settings tile: phone-drop-toggle on / off / status | `bin/phone-drop-toggle` |
 | **phone-float** | While you drag a file or text from any app, a phone floats in at the right edge; drop on it to send it to your phone with Phone Drop. Runs ~/.local/bin/phone-float. | `extensions/custom/phone-float@arco`<br>`bin/phone-float` |
+| **phone-link** | Phone Link - your paired phone and this laptop, always one tap apart | `bin/phone-link`<br>`applications/phone-link.desktop`<br>`systemd/user/phone-link.service` |
+| **phone-link-pair** | Dropline window: your paired phones (battery, connected, remove), the phone's clipboard history, and pairing | `bin/phone-link-pair` |
+| **phone-link.socket** |  | `systemd/user/phone-link.socket` |
 | **popout** | Picture-in-picture for any window: Super+P floats a live mini copy of the focused window above everything. Drag it to move it (it snaps to a corner), scroll to resize, double-click to go back to the window. Super+P again closes it. | `extensions/custom/popout@arco` |
 | **power-auto** | Battery-smart power mode: Power Saver on battery, Balanced on charger | `bin/power-auto`<br>`systemd/user/power-auto.service` |
 | **presence** | Presence: dims and blanks the screen soon after you leave, but keeps it on while you | `bin/presence`<br>`systemd/user/presence.service` |
@@ -85,12 +91,12 @@ Third-party extensions added (made by others, chosen by arco):
 
 System steps (in `system/install-system.sh`):
 
+- Dropline + Phone Drop: let phones on your hotspot / Wi-Fi reach them (TCP 47800, 47802)
 - File index for the Super+F file finder (plocate)
 - Hotspot guard (asks before new devices use your hotspot) + Stay Awake link
 - Intel SOF sound fix
 - Logs capped at 300 MB, snaps keep 2 old versions
 - Memory: zram swap (1.5x RAM) + earlyoom + tuned kernel settings
-- Phone Drop: let phones on your hotspot / Wi-Fi reach it (TCP 47800)
 - Rounded blur library (for the music pill's blur)
 - Weekly system tidy (Sundays)
 - kdump off (frees 320-512 MB of RAM reserved for crash dumps)

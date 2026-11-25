@@ -20,6 +20,7 @@ arco	third-party	extensions/third-party/dash-to-dock@micxgx.gmail.com	dash-to-do
 arco	script	bin/docker-toggle	docker-toggle
 arco	sudo-rule	system/sudoers/docker-toggle	docker-toggle
 arco	extension	extensions/custom/dot-badges@arco	dot-badges
+arco	extension	extensions/custom/dropline@arco	dropline
 arco	extension	extensions/custom/dust-delete@arco	dust-delete
 arco	third-party	extensions/third-party/dynamic-music-pill@andbal	dynamic-music-pill
 arco	third-party	extensions/third-party/emoji-copy@felipeftn	emoji-copy
@@ -32,6 +33,7 @@ arco	service	systemd/user/fix-audio-login.service	fix-audio
 arco	script	bin/headphone-magic	headphone-magic
 arco	service	systemd/user/headphone-magic.service	headphone-magic
 arco	script	bin/hotspot	hotspot
+arco	script	bin/hotspot-band	hotspot-band
 arco	extension	extensions/custom/hotspot-devices@arco	hotspot-devices
 arco	script	bin/hotspot-devices	hotspot-devices
 arco	sudo-rule	system/sudoers/hotspot-guard	hotspot-guard
@@ -47,8 +49,14 @@ arco	service	systemd/user/organize-downloads.service	organize-downloads
 arco	service	systemd/user/organize-downloads.timer	organize-downloads
 arco	files-menu	config/nautilus-scripts/Send to phone	phone-drop
 arco	script	bin/phone-drop	phone-drop
+arco	script	bin/phone-drop-toggle	phone-drop-toggle
 arco	extension	extensions/custom/phone-float@arco	phone-float
 arco	script	bin/phone-float	phone-float
+arco	launcher	applications/phone-link.desktop	phone-link
+arco	script	bin/phone-link	phone-link
+arco	service	systemd/user/phone-link.service	phone-link
+arco	script	bin/phone-link-pair	phone-link-pair
+arco	service	systemd/user/phone-link.socket	phone-link.socket
 arco	extension	extensions/custom/popout@arco	popout
 arco	script	bin/power-auto	power-auto
 arco	service	systemd/user/power-auto.service	power-auto
@@ -75,12 +83,12 @@ arco	service	systemd/user/session-keeper-save.service	session-keeper
 arco	service	systemd/user/session-keeper-save.timer	session-keeper
 arco	script	bin/stay-awake	stay-awake
 arco	service	systemd/user/stay-awake-restore.service	stay-awake
+arco	system-step	Dropline + Phone Drop: let phones on your hotspot / Wi-Fi reach them (TCP 47800, 47802)	system
 arco	system-step	File index for the Super+F file finder (plocate)	system
 arco	system-step	Hotspot guard (asks before new devices use your hotspot) + Stay Awake link	system
 arco	system-step	Intel SOF sound fix	system
 arco	system-step	Logs capped at 300 MB, snaps keep 2 old versions	system
 arco	system-step	Memory: zram swap (1.5x RAM) + earlyoom + tuned kernel settings	system
-arco	system-step	Phone Drop: let phones on your hotspot / Wi-Fi reach it (TCP 47800)	system
 arco	system-step	Rounded blur library (for the music pill's blur)	system
 arco	system-step	Weekly system tidy (Sundays)	system
 arco	system-step	kdump off (frees 320-512 MB of RAM reserved for crash dumps)	system
