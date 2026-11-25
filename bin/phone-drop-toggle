@@ -1,0 +1,19 @@
+#!/bin/bash
+# Phone Drop quick settings tile: phone-drop-toggle on | off | status
+#   on:     Phone Link waits for your paired phone on the hotspot (costs nothing until it connects);
+#           with no phone paired yet, the pairing window opens
+#   off:    Phone Link stops and no phone can connect
+#   status: "active" while Phone Link is on
+case "$1" in
+  on)
+    systemctl --user enable --now phone-link.socket >/dev/null 2>&1
+    if ! grep -q '"hash"' "$HOME/.config/phone-drop/devices.json" 2>/dev/null; then
+      DROPLINE_PAIR=1 setsid -f "$HOME/.local/bin/phone-link-pair" >/dev/null 2>&1
+    fi ;;
+  off)
+    systemctl --user disable --now phone-link.socket >/dev/null 2>&1
+    systemctl --user stop phone-link.service >/dev/null 2>&1 ;;
+  status)
+    if systemctl --user is-active --quiet phone-link.socket; then echo active; else echo inactive; exit 1; fi ;;
+  *) echo "Usage: phone-drop-toggle on|off|status"; exit 2 ;;
+esac

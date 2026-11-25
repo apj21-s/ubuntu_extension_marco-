@@ -11,6 +11,7 @@ input region), so showing it mid-drag never steals focus. The phone-float@arco G
 extension places it, keeps it on top, and calls the "show" / "hide" actions when a drag
 starts or ends. Nothing is drawn or animated while idle.
 """
+import json
 import math
 import os
 import time
@@ -31,6 +32,7 @@ WIN_W, WIN_H = 220, 300          # room around the phone for its shadow and the 
 PH_W, PH_H, PH_R = 92, 168, 18   # the phone body
 TEXT_W = 78                      # captions wrap within this width
 PHONE_DROP = os.path.join(os.path.expanduser("~"), ".local", "bin", "phone-drop")
+DROPLINE_KEYS = os.path.join(os.path.expanduser("~"), ".config", "phone-drop", "devices.json")
 
 IN_MS, OUT_MS = 260, 200
 SINK_AFTER_CHECK_MS = 600
@@ -38,6 +40,7 @@ SINK_AFTER_CHECK_MS = 600
 DROP_FALL, DROP_SWEEP, DROP_CHECK = 260, 620, 300
 
 CRIMSON = (0.816, 0.376, 0.416)   # #d0606a
+CRIMSON_LIVE = (0.863, 0.078, 0.235)  # #dc143c, the Dropline accent
 DEEP = (0.694, 0.267, 0.302)      # #b1444d
 CREAM = (0.961, 0.933, 0.902)     # #f5eee6
 BODY = (0.078, 0.067, 0.067)      # #141111
@@ -97,6 +100,9 @@ class Phone(Gtk.ApplicationWindow):
         self.drop_thumb = None    # cairo surface of an image preview
         self.pending = None       # (paths, text) to hand to phone-drop
         self.sent = False
+        self.targets = []         # Dropline phones: connected ones first, else the paired one (files queue for it)
+        self.pick = 0             # which of two phones the pointer is over
+        self.drop_idx = 0
         self.tick_id = 0
         self.last = 0.0
 
@@ -106,6 +112,7 @@ class Phone(Gtk.ApplicationWindow):
         self.area.add_controller(drop)
         motion = Gtk.DropControllerMotion()
         motion.connect("enter", lambda *_: self._hovering(True))
+        motion.connect("motion", lambda _m, x, _y: self._pointer(x))
         motion.connect("leave", lambda *_: self._hovering(False))
         self.area.add_controller(motion)
 
@@ -125,6 +132,7 @@ class Phone(Gtk.ApplicationWindow):
     def show_phone(self):
         if self.drop_t0 is not None:
             return
+        self._ask_dropline()
         self.anim = animations_on()
         self.sent = False
         self._set_input(True)
@@ -141,6 +149,40 @@ class Phone(Gtk.ApplicationWindow):
         self.vis_from, self.vis_to, self.vis_t0 = self.vis, target, now
         self.vis_ms = ms if self.anim else 120
         self._start_tick()
+
+    # ---------- Dropline ----------
+    def _ask_dropline(self):
+        """Which phones can take a drop right now (async: never delays the slide-in)."""
+        if not os.path.exists(DROPLINE_KEYS):
+            self.targets = []
+            return
+        Gio.bus_get(Gio.BusType.SESSION, None, self._got_bus)
+
+    def _got_bus(self, _src, res):
+        try:
+            bus = Gio.bus_get_finish(res)
+        except GLib.Error:
+            return
+        bus.call("io.arco.PhoneLink", "/io/arco/PhoneLink", "io.arco.PhoneLink", "Status", None, GLib.VariantType("(s)"),
+                 Gio.DBusCallFlags.NONE, 3000, None, self._got_status)
+
+    def _got_status(self, bus, res):
+        try:
+            st = json.loads(bus.call_finish(res).unpack()[0])
+        except (GLib.Error, ValueError):
+            self.targets = []
+            return
+        devs = st.get("devices", [])
+        live = [d for d in devs if d.get("connected")]
+        self.targets = live[:2] if live else devs[:1]
+        self.area.queue_draw()
+
+    def _pointer(self, x):
+        if len(self.targets) > 1 and self.drop_t0 is None:
+            pick = 0 if x < WIN_W / 2 else 1
+            if pick != self.pick:
+                self.pick = pick
+                self.area.queue_draw()
 
     # ---------- hover ----------
     def _hovering(self, on):
@@ -164,6 +206,7 @@ class Phone(Gtk.ApplicationWindow):
         if not paths and not text:
             return False
         self.pending = (paths, text)
+        self.drop_idx = self.pick if len(self.targets) > 1 else 0
         self._prepare_drop_visual(paths, text)
         self.hover_target = 1.0
         self.drop_t0 = time.monotonic() * 1000
@@ -198,6 +241,12 @@ class Phone(Gtk.ApplicationWindow):
             return
         self.sent = True
         paths, text = self.pending
+        if self.targets:  # a paired phone: straight to it (or its queue), no window, no QR
+            dev = self.targets[min(self.drop_idx, len(self.targets) - 1)]["id"]
+            Gio.bus_get(Gio.BusType.SESSION, None, lambda _s, r: Gio.bus_get_finish(r).call(
+                "io.arco.PhoneLink", "/io/arco/PhoneLink", "io.arco.PhoneLink", "Send",
+                GLib.Variant("(asss)", (list(paths), text or "", dev)), None, Gio.DBusCallFlags.NONE, 10000, None, None))
+            return
         argv = [PHONE_DROP] + list(paths)
         if text:
             tmp = os.path.join(GLib.get_user_runtime_dir(), f"phone-float-text-{uuid.uuid4().hex[:6]}")
@@ -279,6 +328,31 @@ class Phone(Gtk.ApplicationWindow):
         cr.push_group()
         cr.translate(cx, cy)
         cr.scale(scale, scale)
+        # one phone, or a pair side by side when two phones are connected (drop on the one you want)
+        n = len(self.targets) if len(self.targets) > 1 else 1
+        for i in range(n):
+            cr.save()
+            if n > 1:
+                cr.translate((i - 0.5) * 100, -8)
+                cr.scale(0.6, 0.6)
+            hv_i = hv if (n == 1 or self.pick == i) else 0.0
+            self._phone(cr, hv_i, d if (n == 1 or self.drop_idx == i) else None)
+            cr.restore()
+            if self.targets:
+                t_ = self.targets[i]
+                bat = t_.get("battery")
+                label = t_["name"] + (f"  {round(bat * 100)}%" if isinstance(bat, (int, float)) else "")
+                y = (PH_H / 2 + 12) if n == 1 else (PH_H * 0.3 + 4)
+                cr.save()
+                if n > 1:
+                    cr.translate((i - 0.5) * 100, 0)
+                self._status(cr, label, t_.get("connected"), y, 0.5 + 0.4 * hv_i)
+                cr.restore()
+
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(t)
+
+    def _phone(self, cr, hv, d):
         x0, y0 = -PH_W / 2, -PH_H / 2
 
         # soft contact shadow (two passes, no colour)
@@ -330,8 +404,33 @@ class Phone(Gtk.ApplicationWindow):
         else:
             self._draw_drop(cr, d, bw, by)
 
-        cr.pop_group_to_source()
-        cr.paint_with_alpha(t)
+
+    def _status(self, cr, label, live, y, alpha):
+        """One centred line under the phone: a crimson dot when the link is live (hollow when files would
+        queue), then the name and battery. Long names end in an ellipsis instead of wrapping."""
+        layout = PangoCairo.create_layout(cr)
+        fo = cairo.FontOptions()
+        fo.set_antialias(cairo.ANTIALIAS_GRAY)
+        PangoCairo.context_set_font_options(layout.get_context(), fo)
+        layout.context_changed()
+        layout.set_font_description(Pango.FontDescription.from_string("Ubuntu Sans Light 7.5"))
+        layout.set_width(Pango.units_from_double(WIN_W - 40))
+        layout.set_ellipsize(Pango.EllipsizeMode.END)
+        layout.set_text(label, -1)
+        tw, th = layout.get_pixel_size()
+        x = -(tw + 10) / 2
+        cr.new_path()
+        cr.arc(x + 3, y + th / 2, 2.6, 0, 2 * math.pi)
+        if live:
+            cr.set_source_rgba(*CRIMSON_LIVE, 0.95)
+            cr.fill()
+        else:
+            cr.set_source_rgba(*CREAM, 0.45)
+            cr.set_line_width(1)
+            cr.stroke()
+        cr.move_to(x + 10, y)
+        cr.set_source_rgba(*CREAM, alpha)
+        PangoCairo.show_layout(cr, layout)
 
     def _caption(self, cr, text, alpha):
         self._text(cr, text, 0, -6, alpha)
@@ -374,7 +473,8 @@ class Phone(Gtk.ApplicationWindow):
 
         # 3) one word to finish
         c = clamp((d - DROP_FALL - DROP_SWEEP) / DROP_CHECK)
-        self._text(cr, "Sent", 0, 22, 0.85 * c)
+        word = "Sent" if not self.targets or self.targets[min(self.drop_idx, len(self.targets) - 1)].get("connected") else "Queued"
+        self._text(cr, word, 0, 22, 0.85 * c)
 
     def _text(self, cr, text, x, y, alpha, size=8, spacing=0.6):
         if alpha <= 0.01:

@@ -141,12 +141,25 @@ done
 run systemctl --user daemon-reload
 for u in fix-audio-login.service headphone-magic.service organize-downloads.path \
   organize-downloads.timer power-auto.service session-keeper-restore.service \
-  session-keeper-save.timer weekly-tidy.timer presence.service stay-awake-restore.service; do
+  session-keeper-save.timer weekly-tidy.timer presence.service stay-awake-restore.service \
+  phone-link.socket; do
   wanted service "systemd/user/$u" && run systemctl --user enable "$u"
 done
 # File indexing off (saves CPU and battery).
 run systemctl --user mask localsearch-3.service localsearch-control-3.service \
   tracker-miner-fs-3.service tracker-miner-fs-control-3.service
+
+step "Dropline (phone <-> laptop: the phone app, its certificate, D-Bus service)"
+if wanted script bin/phone-link; then
+  put "$REPO/share/phone-link/web" "$HOME/.local/share/phone-link/web"
+  put "$REPO/share/phone-link/brand" "$HOME/.local/share/phone-link/brand"
+  put "$REPO/share/phone-link/web/icon-192.png" "$HOME/.local/share/icons/phone-link.png"
+  put "$REPO/config/dbus/io.arco.PhoneLink.service" "$HOME/.local/share/dbus-1/services/io.arco.PhoneLink.service"
+  # this laptop's own certificate authority (made here, never stored in the repo); kept if it exists
+  run "$HOME/.local/bin/phone-link" init
+else
+  echo "   skipped Dropline (made by $(owner_of script bin/phone-link))"
+fi
 
 step "Startup items"
 put_if startup autostart/login-sound.desktop "$HOME/.config/autostart/login-sound.desktop"

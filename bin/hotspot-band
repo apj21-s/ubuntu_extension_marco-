@@ -1,0 +1,18 @@
+#!/bin/bash
+# Hotspot radio band: hotspot-band fast | range | status
+#   fast:   5 GHz, channel 36, 80 MHz wide: several times faster, best in the same room
+#   range:  2.4 GHz, channel 6, 20 MHz: slower, reaches through walls
+# A running hotspot restarts on the new band (connected phones drop for a few seconds and rejoin).
+CON=Hotspot
+case "$1" in
+  fast)  nmcli con modify "$CON" 802-11-wireless.band a  802-11-wireless.channel 36 802-11-wireless.channel-width 80mhz || exit 1 ;;
+  range) nmcli con modify "$CON" 802-11-wireless.band bg 802-11-wireless.channel 6  802-11-wireless.channel-width 20mhz || exit 1 ;;
+  status)
+    [ "$(nmcli -g 802-11-wireless.band con show "$CON")" = "a" ] && echo fast || echo range
+    exit 0 ;;
+  *) echo "Usage: hotspot-band fast|range|status"; exit 2 ;;
+esac
+if nmcli -t -f NAME con show --active | grep -qx "$CON"; then
+  nmcli con up "$CON" >/dev/null 2>&1 || { sleep 2; nmcli con up "$CON" >/dev/null 2>&1; }
+fi
+exit 0

@@ -83,12 +83,14 @@ if part "File index for the Super+F file finder (plocate)"; then
   systemctl start --no-block plocate-updatedb.service
 fi
 
-if part "Phone Drop: let phones on your hotspot / Wi-Fi reach it (TCP 47800)"; then
+if part "Dropline + Phone Drop: let phones on your hotspot / Wi-Fi reach them (TCP 47800, 47802)"; then
   echo "   Wi-Fi card: $WIFI"
-  # The hotspot and Wi-Fi share the Wi-Fi card, so one rule covers both. The port only
-  # listens while the Phone Drop window is open, and every link needs its random secret.
+  # The hotspot and Wi-Fi share the Wi-Fi card, so one rule each covers both.
+  # 47800 = Dropline (paired phones only: every request needs that phone's key; pairing only on the hotspot).
+  # 47802 = Phone Drop's one-off QR mode (only while its window is open, every link has a random secret).
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow in on "$WIFI" to any port 47800 proto tcp comment "Phone Drop" >/dev/null
+    ufw allow in on "$WIFI" to any port 47800 proto tcp comment "Dropline" >/dev/null
+    ufw allow in on "$WIFI" to any port 47802 proto tcp comment "Phone Drop" >/dev/null
     echo "   firewall rule added"
   else
     echo "   firewall is off - nothing to do"

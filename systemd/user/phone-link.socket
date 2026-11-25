@@ -1,0 +1,11 @@
+[Unit]
+Description=Dropline (waits for your paired phones; answers only on the hotspot and networks you trust)
+
+[Socket]
+# every address; the service drops connections that arrive through an untrusted network
+ListenStream=47800
+NoDelay=true
+Backlog=32
+
+[Install]
+WantedBy=sockets.target

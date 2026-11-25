@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Dropline
+Comment=Your paired phones, networks, phone clipboard and scans
+Exec=@HOME@/.local/bin/phone-link-pair
+Icon=@HOME@/.local/share/icons/phone-link.png
+NoDisplay=false

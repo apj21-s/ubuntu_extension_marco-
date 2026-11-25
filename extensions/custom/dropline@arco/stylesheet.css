@@ -1,0 +1,22 @@
+.dl-stack { spacing: 10px; }
+.dl-card {
+  background-color: #1c1b1b !important; border-radius: 16px; padding: 12px 14px; spacing: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: #f1edea;
+}
+.dl-card:hover { background-color: #222020 !important; }
+.dl-thumb { width: 44px; height: 44px; border-radius: 10px; }
+.dl-icon { icon-size: 36px; }
+.dl-text { spacing: 2px; }
+.dl-title { font-size: 10.5pt; font-weight: 600; color: #f1edea; }
+.dl-body { font-size: 9.5pt; color: rgba(241, 237, 234, 0.6); }
+.dl-actions { spacing: 8px; padding-top: 8px; }
+.dl-btn {
+  padding: 6px 14px; border-radius: 9px; font-size: 9.5pt; font-weight: 600;
+  background-color: rgba(255, 255, 255, 0.07); color: #f1edea;
+}
+.dl-btn:hover { background-color: rgba(255, 255, 255, 0.13); }
+.dl-btn.dl-primary { background-color: #dc143c; color: #ffffff; }
+.dl-btn.dl-primary:hover { background-color: #ef2350; }
+.dl-close { padding: 4px; border-radius: 99px; color: rgba(241, 237, 234, 0.45); background-color: transparent; }
+.dl-close:hover { color: #f1edea; background-color: rgba(255, 255, 255, 0.1); }
