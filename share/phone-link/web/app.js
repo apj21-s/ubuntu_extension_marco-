@@ -89,7 +89,7 @@ function connect() {
 }
 
 // ---------- laptop -> phone ----------
-const started = new Set(JSON.parse(sessionStorage.getItem('started') || '[]'));
+const started = new Set();   // in memory only: after a reload, anything still queued on the laptop is tried again
 const rowsIn = new Map();
 function inbound(items) {
   const ids = new Set(items.map(i => i.id));
@@ -112,7 +112,7 @@ function inbound(items) {
     r.size = size(it.size);
     rowsIn.set(it.id, r);
     if (!started.has(it.id)) {
-      started.add(it.id); sessionStorage.setItem('started', JSON.stringify([...started]));
+      started.add(it.id);
       receive(it, r);
     }
   }
@@ -135,6 +135,7 @@ async function kv(key, value) {
     q.onsuccess = () => ok(q.result); q.onerror = () => bad(q.error);
   });
 }
+let folderReady = null;   // queued files wait for this, so a fresh launch doesn't fall back to Downloads by mistake
 async function loadFolder() {
   if (!canPick) return;
   try { folder = await kv('folder') || null; } catch (e) { folder = null; }
@@ -164,18 +165,33 @@ async function freeName(name) {
     try { await folder.getFileHandle(candidate); } catch (e) { return candidate; }   // NotFound: free
   }
 }
-const waiting = new Map();   // id -> [item, row] needing a tap to allow the folder again
+const waiting = new Map();   // id -> [item, row] needing a tap (folder permission, or Chrome wants a tap first)
+const tapped = () => !navigator.userActivation || navigator.userActivation.hasBeenActive;
+function needTap(it, r, why) {
+  waiting.set(it.id, [it, r]);
+  r.bar(null); r.sub(`${size(it.size)} · ${why}`);
+  r.li.onclick = () => retryWaiting();
+  if (waiting.size === 1) toast(why === 'Tap to download' ? 'A file from the laptop is waiting · tap it' : why);
+}
 async function receive(it, r) {
+  if (folderReady) await folderReady;
+  if (!r.li.isConnected || r.done) return;
   if (!canPick || !folder) {   // Chrome's download manager takes it (and resumes if cut)
+    if (!tapped()) return needTap(it, r, 'Tap to download');   // Chrome ignores downloads before the first tap
     const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name; a.click();
+    r.sub(size(it.size) + ' · Downloading');
+    // the laptop drops the item from the queue once the last byte went out; if that never happens,
+    // Chrome blocked or lost it: ask for a tap instead of showing "Downloading" forever
+    setTimeout(() => { if (!r.done && rowsIn.get(it.id) === r && !waiting.has(it.id)) needTap(it, r, 'Tap to download'); }, 20000 + it.size / 2e6 * 1000);
     return;
   }
   if (!(await writable())) {
     waiting.set(it.id, [it, r]);
-    r.sub(size(it.size) + ' · Tap to save');
+    r.bar(null); r.sub(size(it.size) + ' · Tap to save');
     r.li.onclick = async () => {
       try { if ((await folder.requestPermission({ mode: 'readwrite' })) === 'granted') retryWaiting(); } catch (e) {}
     };
+    if (waiting.size === 1) toast('A file from the laptop is waiting · tap it');
     return;
   }
   try {
@@ -192,6 +208,9 @@ async function receive(it, r) {
     waiting.set(it.id, [it, r]); r.li.onclick = () => retryWaiting();
   }
 }
+// coming back to the app (or the first tap anywhere) retries whatever is waiting
+document.addEventListener('visibilitychange', () => { if (!document.hidden && waiting.size) retryWaiting(); });
+addEventListener('pointerdown', () => { if (waiting.size) setTimeout(retryWaiting, 0); }, { once: true });
 function retryWaiting() {
   const items = [...waiting.values()]; waiting.clear();
   for (const [it, r] of items) { r.li.onclick = null; receive(it, r); }
@@ -565,7 +584,7 @@ $('installbtn').onclick = async () => { if (!installEv) return; installEv.prompt
 addEventListener('appinstalled', () => { $('install').hidden = true; toast('Installed'); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-loadFolder();
+folderReady = loadFolder();
 // Phones paired at the old hotspot address move to the laptop's name, which works on every trusted network.
 async function moveToName() {
   if (!/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname)) return false;
