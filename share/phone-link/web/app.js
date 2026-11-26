@@ -150,7 +150,7 @@ function markFolderBroken() {
 function showFolder() {
   $('folderBanner').hidden = !canPick;
   $('folderText').textContent = folder && !folderBroken ? folder.name
-    : folder ? 'Downloads · this phone can\'t give folder access' : 'Downloads · pick a Dropline folder';
+    : folder ? 'Downloads · no folder pop-ups on this phone' : 'Downloads · pick a Dropline folder';
   $('folderBtn').textContent = folder ? (folderBroken ? 'Try again' : 'Change') : 'Choose';
 }
 $('folderBtn').onclick = async () => {
@@ -191,7 +191,7 @@ function showSaveBar() {
   if (n) $('saveAllText').textContent = `${n === 1 ? 'A file' : n + ' files'} from ${$('laptop').textContent}`;
 }
 $('saveAllBtn').onclick = () => retryWaiting();
-const APP_VERSION = 'q3';
+const APP_VERSION = 'q5';
 async function diag(stage, extra) {
   let perm = 'n/a';
   perm = await permission(false);
@@ -203,8 +203,10 @@ async function receive(it, r) {
   if (folderReady) await folderReady;
   if (!r.li.isConnected || r.done) return;
   if (folder && !folderBroken) {
+    // Chrome on Android forgets folder access every time the app closes ("prompt" again), and asking
+    // means a pop-up per session: anything but an instant yes switches this phone to Downloads for good
     const p = await permission(false);
-    if (p === 'no answer' || p === 'error') markFolderBroken();   // fall through to Downloads
+    if (p !== 'granted') markFolderBroken();
   }
   if (!canPick || !folder || folderBroken) {   // Chrome's download manager takes it (and resumes if cut)
     if (!tapped()) return needTap(it, r, 'Waiting for one tap');   // Chrome ignores downloads before the first tap
