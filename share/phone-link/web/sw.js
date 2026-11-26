@@ -1,6 +1,6 @@
 // Phone Link service worker: the app opens instantly (even with the laptop asleep), and
 // "Share to Laptop" lands here first so nothing is lost if the laptop is not reachable yet.
-const SHELL = 'shell-v30';
+const SHELL = 'shell-v31';
 const FILES = ['/app', '/app.css', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -93,7 +93,7 @@ const started = new Set();   // in memory only: after a reload, anything still q
 const rowsIn = new Map();
 function inbound(items) {
   const ids = new Set(items.map(i => i.id));
-  for (const [id, r] of rowsIn) if (!ids.has(id) && !r.done) { r.done = true; r.bar(null); if (!r.text) r.sub(r.size + (folder && !folderBroken ? ` · Saved to ${folder.name}` : ' · Saved to Downloads')); if (waiting.delete(id)) showSaveBar(); }
+  for (const [id, r] of rowsIn) if (!ids.has(id) && !r.done) { r.done = true; r.bar(null); if (!r.text) r.sub(r.size + ' · Saved to Downloads'); if (waiting.delete(id)) showSaveBar(); }
   for (const it of items) {
     if (rowsIn.has(it.id)) continue;
     if (it.kind === 'text') {
@@ -118,66 +118,8 @@ function inbound(items) {
   }
 }
 
-// ---------- where laptop files land on the phone: a "Dropline" folder you pick once ----------
-// (File System Access; without it, or before a folder is picked, Chrome's Downloads is used)
-const canPick = 'showDirectoryPicker' in window;
-let folder = null;
-const db = () => new Promise((ok, bad) => {
-  const q = indexedDB.open('dropline', 1);
-  q.onupgradeneeded = () => q.result.createObjectStore('kv');
-  q.onsuccess = () => ok(q.result); q.onerror = () => bad(q.error);
-});
-async function kv(key, value) {
-  const d = await db();
-  return new Promise((ok, bad) => {
-    const t = d.transaction('kv', value === undefined ? 'readonly' : 'readwrite').objectStore('kv');
-    const q = value === undefined ? t.get(key) : t.put(value, key);
-    q.onsuccess = () => ok(q.result); q.onerror = () => bad(q.error);
-  });
-}
-let folderReady = null;   // queued files wait for this (at most 1.5 s), so a fresh launch doesn't fall back to Downloads by mistake
-let folderBroken = false;   // this phone never answers folder permission questions: use Downloads instead
-async function loadFolder() {
-  if (!canPick) return;
-  try { folder = await kv('folder') || null; folderBroken = !!(await kv('folderBroken')); } catch (e) { folder = null; }
-  showFolder();
-}
-function markFolderBroken() {
-  if (folderBroken) return;
-  folderBroken = true; kv('folderBroken', true).catch(() => {}); showFolder();
-  diag('folder-broken');
-}
-function showFolder() {
-  $('folderBanner').hidden = !canPick;
-  $('folderText').textContent = folder && !folderBroken ? folder.name
-    : folder ? 'Downloads · no folder pop-ups on this phone' : 'Downloads · pick a Dropline folder';
-  $('folderBtn').textContent = folder ? (folderBroken ? 'Try again' : 'Change') : 'Choose';
-}
-$('folderBtn').onclick = async () => {
-  try {
-    const h = await showDirectoryPicker({ id: 'dropline', mode: 'readwrite', startIn: 'downloads' });
-    folder = h; folderBroken = false; await kv('folder', h); await kv('folderBroken', false); showFolder();
-    toast(`Saving to “${h.name}”`);
-    retryWaiting();
-  } catch (e) { if (e.name !== 'AbortError') toast("Couldn't use that folder"); }
-};
-// Android can leave these permission questions unanswered forever, so never wait long for one
-const within = (p, ms, fallback) => Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
-async function permission(ask) {
-  if (!folder) return 'none';
-  try { return await within(ask ? folder.requestPermission({ mode: 'readwrite' }) : folder.queryPermission({ mode: 'readwrite' }),
-    ask ? 4000 : 1200, 'no answer'); }
-  catch (e) { return 'error'; }
-}
-async function writable() { return (await permission(false)) === 'granted'; }
-async function freeName(name) {
-  const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
-  for (let n = 0; ; n++) {
-    const candidate = n ? `${stem} (${n})${ext}` : name;
-    try { await folder.getFileHandle(candidate); } catch (e) { return candidate; }   // NotFound: free
-  }
-}
-const waiting = new Map();   // id -> [item, row] needing a tap (folder permission, or Chrome wants a tap first)
+// ---------- laptop -> phone: Chrome's Downloads (it resumes cut downloads by itself) ----------
+const waiting = new Map();   // id -> [item, row]: Chrome wants a tap before it downloads
 const tapped = () => !navigator.userActivation || navigator.userActivation.hasBeenActive;
 function needTap(it, r, why) {
   waiting.set(it.id, [it, r]);
@@ -191,66 +133,21 @@ function showSaveBar() {
   if (n) $('saveAllText').textContent = `${n === 1 ? 'A file' : n + ' files'} from ${$('laptop').textContent}`;
 }
 $('saveAllBtn').onclick = () => retryWaiting();
-const APP_VERSION = 'q6';
-async function diag(stage, extra) {
-  let perm = 'n/a';
-  perm = await permission(false);
+const APP_VERSION = 'q7';
+async function diag(stage, extra) {   // what the app sees, logged on the laptop (for fixing delivery problems)
   fetch('/api/diag', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({
-    v: APP_VERSION, stage, canPick, folder: folder ? folder.name : null, perm, tapped: tapped(),
-    visible: !document.hidden, standalone: matchMedia('(display-mode: standalone)').matches }, extra || {})) }).catch(() => {});
+    v: APP_VERSION, stage, tapped: tapped(), visible: !document.hidden,
+    standalone: matchMedia('(display-mode: standalone)').matches }, extra || {})) }).catch(() => {});
 }
 async function receive(it, r) {
-  if (folderReady) await folderReady;
   if (!r.li.isConnected || r.done) return;
-  if (folder && !folderBroken) {
-    // Chrome on Android forgets folder access every time the app closes ("prompt" again), and asking
-    // means a pop-up per session: anything but an instant yes switches this phone to Downloads for good
-    const p = await permission(false);
-    if (p !== 'granted') markFolderBroken();
-  }
-  if (!canPick || !folder || folderBroken) {   // Chrome's download manager takes it (and resumes if cut)
-    if (!tapped()) return needTap(it, r, 'Waiting for one tap');   // Chrome ignores downloads before the first tap
-    const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name; a.click();
-    r.sub(size(it.size) + ' · Saving to Downloads');
-    // the laptop drops the item from the queue once the last byte went out; if that never happens,
-    // Chrome blocked or lost it: ask for a tap instead of showing "Downloading" forever
-    setTimeout(() => { if (!r.done && rowsIn.get(it.id) === r && !waiting.has(it.id)) needTap(it, r, 'Didn\'t save · tap Save all'); }, 20000 + it.size / 2e6 * 1000);
-    return;
-  }
-  if (!(await writable())) {
-    waiting.set(it.id, [it, r]);
-    r.bar(null); r.sub(size(it.size) + ' · Tap to save');
-    r.li.onclick = async () => {
-      const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name;   // made now, inside the tap
-      const p = await permission(true);
-      diag('tap-permission', { file: it.name, answer: p });
-      if (p === 'granted') return retryWaiting();
-      waiting.delete(it.id); r.li.onclick = null; showSaveBar();
-      markFolderBroken();
-      a.click();   // folder access isn't available: Chrome's Downloads, so the file still arrives
-      r.sub(size(it.size) + ' · Saving to Downloads');
-    };
-    showSaveBar();
-    return;
-  }
-  try {
-    const name = await freeName(it.name);
-    const res = await fetch(`/api/f/${it.id}`);
-    if (!res.ok) throw new Error(res.status);
-    const out = await (await folder.getFileHandle(name, { create: true })).createWritable();
-    let got = 0;
-    const count = new TransformStream({ transform(chunk, c) { got += chunk.byteLength; r.bar(it.size ? 100 * got / it.size : 100); c.enqueue(chunk); } });
-    await res.body.pipeThrough(count).pipeTo(out);
-    r.bar(null); r.sub(`${size(it.size)} · Saved to ${folder.name}`); r.done = true;
-  } catch (e) {
-    diag('folder-save-failed', { file: it.name, err: String(e && (e.name + ': ' + e.message)).slice(0, 160) });
-    r.bar(null); r.sub(size(it.size) + ' · Failed, tap to retry', true);
-    waiting.set(it.id, [it, r]); r.li.onclick = () => retryWaiting();
-  }
+  if (!tapped()) return needTap(it, r, 'Waiting for one tap');   // Chrome ignores downloads before the first tap
+  const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name; a.click();
+  r.sub(size(it.size) + ' · Saving to Downloads');
+  // the laptop drops the item from the queue once the last byte went out; if that never happens,
+  // Chrome blocked or lost it: ask for a tap instead of showing "Downloading" forever
+  setTimeout(() => { if (!r.done && rowsIn.get(it.id) === r && !waiting.has(it.id)) needTap(it, r, 'Didn\'t save · tap Save all'); }, 20000 + it.size / 2e6 * 1000);
 }
-// coming back to the app (or the first tap anywhere) retries whatever is waiting
-document.addEventListener('visibilitychange', () => { if (!document.hidden && waiting.size) retryWaiting(); });
-addEventListener('pointerdown', () => { if (waiting.size) setTimeout(retryWaiting, 0); }, { once: true });
 function retryWaiting() {
   const items = [...waiting.values()]; waiting.clear(); showSaveBar();
   for (const [it, r] of items) { r.li.onclick = null; receive(it, r); }
@@ -672,8 +569,7 @@ $('installbtn').onclick = async () => { if (!installEv) return; installEv.prompt
 addEventListener('appinstalled', () => { $('install').hidden = true; toast('Installed'); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-folderReady = within(loadFolder(), 1500);
-folderReady.then(() => diag('boot'));
+diag('boot');
 showNotifyState();
 // Phones paired at the old hotspot address move to the laptop's name, which works on every trusted network.
 async function moveToName() {
