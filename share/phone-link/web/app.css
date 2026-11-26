@@ -40,6 +40,12 @@ h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -.01em; white
 
 main { padding: 16px 16px max(32px, env(safe-area-inset-bottom)); }
 
+/* ---------- files from the laptop waiting for one tap ---------- */
+.savebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 10px 10px 10px 16px;
+  border-radius: 12px; background: var(--surface); border: 1px solid rgba(255, 61, 99, .55); color: var(--text); font-size: 14.5px; }
+.savebar[hidden] { display: none; }
+.savebar button { flex: none; height: 36px; padding: 0 16px; border: 0; border-radius: 9px; background: var(--accent); color: #fff; font-weight: 600; font-size: 14px; }
+
 /* ---------- actions: one primary, three secondary ---------- */
 .primary-btn { display: flex; align-items: center; justify-content: center; gap: 10px; height: 52px; border-radius: 12px; background: var(--accent);
   color: #fff; font-size: 16px; font-weight: 500; cursor: pointer; }

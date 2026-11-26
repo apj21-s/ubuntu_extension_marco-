@@ -53,6 +53,7 @@
 </header>
 
 <main>
+  <div class="savebar" id="saveAll" hidden><span id="saveAllText"></span><button id="saveAllBtn">Save all</button></div>
   <div class="actions" id="actions">
     <label class="primary-btn"><input type="file" id="pickMedia" accept="image/*,video/*" multiple>
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Send photos &amp; videos</label>
@@ -78,6 +79,11 @@
       <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       <div class="lbl"><div>Save laptop files to</div><small id="folderText">Downloads</small></div>
       <button class="text" id="folderBtn">Choose</button>
+    </div>
+    <div class="set" id="notifyRow" hidden>
+      <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      <div class="lbl"><div>Notifications</div><small id="notifyText">Know when the laptop sends something</small></div>
+      <button class="text" id="notifyBtn">Turn on</button>
     </div>
     <div class="set">
       <svg viewBox="0 0 24 24"><path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/></svg>

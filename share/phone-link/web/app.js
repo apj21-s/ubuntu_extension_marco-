@@ -84,7 +84,7 @@ function connect() {
   });
   es.addEventListener('history', e => historyLive(JSON.parse(e.data)));
 
-  es.addEventListener('out', e => inbound(JSON.parse(e.data)));
+  es.addEventListener('out', e => { const items = JSON.parse(e.data); const fresh = items.filter(i => !rowsIn.has(i.id)); inbound(items); notifyIncoming(fresh); });
   es.onerror = () => setLinked(false); // EventSource reconnects by itself
 }
 
@@ -93,7 +93,7 @@ const started = new Set();   // in memory only: after a reload, anything still q
 const rowsIn = new Map();
 function inbound(items) {
   const ids = new Set(items.map(i => i.id));
-  for (const [id, r] of rowsIn) if (!ids.has(id) && !r.done) { r.done = true; r.bar(null); if (!r.text) r.sub(r.size + (folder ? ` · Saved to ${folder.name}` : ' · Saved to Downloads')); }
+  for (const [id, r] of rowsIn) if (!ids.has(id) && !r.done) { r.done = true; r.bar(null); if (!r.text) r.sub(r.size + (folder && !folderBroken ? ` · Saved to ${folder.name}` : ' · Saved to Downloads')); if (waiting.delete(id)) showSaveBar(); }
   for (const it of items) {
     if (rowsIn.has(it.id)) continue;
     if (it.kind === 'text') {
@@ -135,29 +135,41 @@ async function kv(key, value) {
     q.onsuccess = () => ok(q.result); q.onerror = () => bad(q.error);
   });
 }
-let folderReady = null;   // queued files wait for this, so a fresh launch doesn't fall back to Downloads by mistake
+let folderReady = null;   // queued files wait for this (at most 1.5 s), so a fresh launch doesn't fall back to Downloads by mistake
+let folderBroken = false;   // this phone never answers folder permission questions: use Downloads instead
 async function loadFolder() {
   if (!canPick) return;
-  try { folder = await kv('folder') || null; } catch (e) { folder = null; }
+  try { folder = await kv('folder') || null; folderBroken = !!(await kv('folderBroken')); } catch (e) { folder = null; }
   showFolder();
+}
+function markFolderBroken() {
+  if (folderBroken) return;
+  folderBroken = true; kv('folderBroken', true).catch(() => {}); showFolder();
+  diag('folder-broken');
 }
 function showFolder() {
   $('folderBanner').hidden = !canPick;
-  $('folderText').textContent = folder ? folder.name : 'Downloads · pick a Dropline folder';
-  $('folderBtn').textContent = folder ? 'Change' : 'Choose';
+  $('folderText').textContent = folder && !folderBroken ? folder.name
+    : folder ? 'Downloads · this phone can\'t give folder access' : 'Downloads · pick a Dropline folder';
+  $('folderBtn').textContent = folder ? (folderBroken ? 'Try again' : 'Change') : 'Choose';
 }
 $('folderBtn').onclick = async () => {
   try {
     const h = await showDirectoryPicker({ id: 'dropline', mode: 'readwrite', startIn: 'downloads' });
-    folder = h; await kv('folder', h); showFolder();
+    folder = h; folderBroken = false; await kv('folder', h); await kv('folderBroken', false); showFolder();
     toast(`Saving to “${h.name}”`);
     retryWaiting();
   } catch (e) { if (e.name !== 'AbortError') toast("Couldn't use that folder"); }
 };
-async function writable() {
-  if (!folder) return false;
-  try { return (await folder.queryPermission({ mode: 'readwrite' })) === 'granted'; } catch (e) { return false; }
+// Android can leave these permission questions unanswered forever, so never wait long for one
+const within = (p, ms, fallback) => Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
+async function permission(ask) {
+  if (!folder) return 'none';
+  try { return await within(ask ? folder.requestPermission({ mode: 'readwrite' }) : folder.queryPermission({ mode: 'readwrite' }),
+    ask ? 4000 : 1200, 'no answer'); }
+  catch (e) { return 'error'; }
 }
+async function writable() { return (await permission(false)) === 'granted'; }
 async function freeName(name) {
   const dot = name.lastIndexOf('.'), stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
   for (let n = 0; ; n++) {
@@ -171,27 +183,52 @@ function needTap(it, r, why) {
   waiting.set(it.id, [it, r]);
   r.bar(null); r.sub(`${size(it.size)} · ${why}`);
   r.li.onclick = () => retryWaiting();
-  if (waiting.size === 1) toast(why === 'Tap to download' ? 'A file from the laptop is waiting · tap it' : why);
+  showSaveBar();
+}
+function showSaveBar() {
+  const n = waiting.size;
+  $('saveAll').hidden = !n;
+  if (n) $('saveAllText').textContent = `${n === 1 ? 'A file' : n + ' files'} from ${$('laptop').textContent}`;
+}
+$('saveAllBtn').onclick = () => retryWaiting();
+const APP_VERSION = 'q3';
+async function diag(stage, extra) {
+  let perm = 'n/a';
+  perm = await permission(false);
+  fetch('/api/diag', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({
+    v: APP_VERSION, stage, canPick, folder: folder ? folder.name : null, perm, tapped: tapped(),
+    visible: !document.hidden, standalone: matchMedia('(display-mode: standalone)').matches }, extra || {})) }).catch(() => {});
 }
 async function receive(it, r) {
   if (folderReady) await folderReady;
   if (!r.li.isConnected || r.done) return;
-  if (!canPick || !folder) {   // Chrome's download manager takes it (and resumes if cut)
-    if (!tapped()) return needTap(it, r, 'Tap to download');   // Chrome ignores downloads before the first tap
+  if (folder && !folderBroken) {
+    const p = await permission(false);
+    if (p === 'no answer' || p === 'error') markFolderBroken();   // fall through to Downloads
+  }
+  if (!canPick || !folder || folderBroken) {   // Chrome's download manager takes it (and resumes if cut)
+    if (!tapped()) return needTap(it, r, 'Waiting for one tap');   // Chrome ignores downloads before the first tap
     const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name; a.click();
-    r.sub(size(it.size) + ' · Downloading');
+    r.sub(size(it.size) + ' · Saving to Downloads');
     // the laptop drops the item from the queue once the last byte went out; if that never happens,
     // Chrome blocked or lost it: ask for a tap instead of showing "Downloading" forever
-    setTimeout(() => { if (!r.done && rowsIn.get(it.id) === r && !waiting.has(it.id)) needTap(it, r, 'Tap to download'); }, 20000 + it.size / 2e6 * 1000);
+    setTimeout(() => { if (!r.done && rowsIn.get(it.id) === r && !waiting.has(it.id)) needTap(it, r, 'Didn\'t save · tap Save all'); }, 20000 + it.size / 2e6 * 1000);
     return;
   }
   if (!(await writable())) {
     waiting.set(it.id, [it, r]);
     r.bar(null); r.sub(size(it.size) + ' · Tap to save');
     r.li.onclick = async () => {
-      try { if ((await folder.requestPermission({ mode: 'readwrite' })) === 'granted') retryWaiting(); } catch (e) {}
+      const a = document.createElement('a'); a.href = `/api/f/${it.id}`; a.download = it.name;   // made now, inside the tap
+      const p = await permission(true);
+      diag('tap-permission', { file: it.name, answer: p });
+      if (p === 'granted') return retryWaiting();
+      waiting.delete(it.id); r.li.onclick = null; showSaveBar();
+      markFolderBroken();
+      a.click();   // folder access isn't available: Chrome's Downloads, so the file still arrives
+      r.sub(size(it.size) + ' · Saving to Downloads');
     };
-    if (waiting.size === 1) toast('A file from the laptop is waiting · tap it');
+    showSaveBar();
     return;
   }
   try {
@@ -204,6 +241,7 @@ async function receive(it, r) {
     await res.body.pipeThrough(count).pipeTo(out);
     r.bar(null); r.sub(`${size(it.size)} · Saved to ${folder.name}`); r.done = true;
   } catch (e) {
+    diag('folder-save-failed', { file: it.name, err: String(e && (e.name + ': ' + e.message)).slice(0, 160) });
     r.bar(null); r.sub(size(it.size) + ' · Failed, tap to retry', true);
     waiting.set(it.id, [it, r]); r.li.onclick = () => retryWaiting();
   }
@@ -212,7 +250,7 @@ async function receive(it, r) {
 document.addEventListener('visibilitychange', () => { if (!document.hidden && waiting.size) retryWaiting(); });
 addEventListener('pointerdown', () => { if (waiting.size) setTimeout(retryWaiting, 0); }, { once: true });
 function retryWaiting() {
-  const items = [...waiting.values()]; waiting.clear();
+  const items = [...waiting.values()]; waiting.clear(); showSaveBar();
   for (const [it, r] of items) { r.li.onclick = null; receive(it, r); }
 }
 
@@ -521,6 +559,48 @@ async function saveScan(next) {
 $('rvSave').onclick = () => saveScan(false);
 $('rvNext').onclick = () => saveScan(true);
 
+// ---------- notifications like any other app (Web Push when the app is closed) ----------
+const canNotify = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+async function showNotifyState() {
+  $('notifyRow').hidden = !canNotify;
+  if (!canNotify) return;
+  let sub = null;
+  try { sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); } catch (e) {}
+  const on = Notification.permission === 'granted' && sub;
+  $('notifyText').textContent = Notification.permission === 'denied' ? 'Blocked · allow in Android settings for this app'
+    : on ? 'On · even when the app is closed' : 'Know when the laptop sends something';
+  $('notifyBtn').textContent = on ? 'Turn off' : 'Turn on';
+  $('notifyBtn').hidden = Notification.permission === 'denied';
+  return on;
+}
+$('notifyBtn').onclick = async () => {
+  const reg = await navigator.serviceWorker.ready;
+  const cur = await reg.pushManager.getSubscription().catch(() => null);
+  if (cur && Notification.permission === 'granted') {   // turn off
+    await cur.unsubscribe().catch(() => {});
+    fetch('/api/push/sub', { method: 'DELETE' }).catch(() => {});
+    toast('Notifications off'); return showNotifyState();
+  }
+  if ((await Notification.requestPermission()) !== 'granted') { toast('Notifications not allowed'); return showNotifyState(); }
+  try {
+    const { key } = await (await fetch('/api/push/key')).json();
+    const raw = Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - key.length % 4) % 4)), c => c.charCodeAt(0));
+    const sub = cur || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: raw });
+    const r = await fetch('/api/push/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sub.toJSON()) });
+    if (!r.ok) throw new Error(r.status);
+    toast('Notifications on');
+  } catch (e) { toast("Couldn't turn on notifications (needs internet)"); diag('push-subscribe-failed', { err: String(e).slice(0, 160) }); }
+  showNotifyState();
+};
+// app open but in the background: the page itself posts the notification (the laptop only pushes when the app is closed)
+async function notifyIncoming(items) {
+  if (!document.hidden || !canNotify || Notification.permission !== 'granted' || !items.length) return;
+  const files = items.filter(i => i.kind !== 'text');
+  const reg = await navigator.serviceWorker.ready;
+  reg.showNotification(files.length ? `${$('laptop').textContent} sent ${files.length === 1 ? files[0].name : files.length + ' files'}` : `Text from ${$('laptop').textContent}`,
+    { body: files.length ? 'Tap to save' : (items[0].text || '').slice(0, 120), tag: 'incoming', renotify: true, icon: '/icon-192.png', badge: '/icon-mono-512.png', data: { url: '/app' } });
+}
+
 // ---------- clipboard: pick from the laptop's history; the phone's copies go to the laptop's list ----------
 async function openClips() {
   $('scrim').hidden = false; void $('sheet').offsetWidth; $('sheet').classList.add('on');
@@ -584,7 +664,9 @@ $('installbtn').onclick = async () => { if (!installEv) return; installEv.prompt
 addEventListener('appinstalled', () => { $('install').hidden = true; toast('Installed'); });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
-folderReady = loadFolder();
+folderReady = within(loadFolder(), 1500);
+folderReady.then(() => diag('boot'));
+showNotifyState();
 // Phones paired at the old hotspot address move to the laptop's name, which works on every trusted network.
 async function moveToName() {
   if (!/^\d+\.\d+\.\d+\.\d+$/.test(location.hostname)) return false;

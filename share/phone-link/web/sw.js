@@ -1,6 +1,6 @@
 // Phone Link service worker: the app opens instantly (even with the laptop asleep), and
 // "Share to Laptop" lands here first so nothing is lost if the laptop is not reachable yet.
-const SHELL = 'shell-v22';
+const SHELL = 'shell-v28';
 const FILES = ['/app', '/app.css', '/app.js', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -41,3 +41,21 @@ async function takeShare(req) {
   if (text) await cache.put(`/shared/${stamp}-text`, new Response(text, { headers: { 'x-text': '1' } }));
   return Response.redirect('/app?shared=' + stamp, 303);
 }
+
+// Notifications: the laptop wakes the phone (Web Push, end-to-end encrypted) when the app is closed.
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (err) { d = { title: 'Dropline', body: e.data && e.data.text() }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'Dropline', {
+    body: d.body || '', tag: d.tag || 'dropline', renotify: true,
+    icon: '/icon-192.png', badge: '/icon-mono-512.png', data: { url: '/app' } }));
+});
+// tapping it opens Dropline (or brings it to the front), where the waiting file is
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const w of wins) if (new URL(w.url).pathname.startsWith('/app')) { await w.focus(); return; }
+    await self.clients.openWindow('/app');
+  })());
+});
