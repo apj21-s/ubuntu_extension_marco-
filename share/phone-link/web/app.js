@@ -79,12 +79,12 @@ async function me() {
 function connect() {
   const es = new EventSource('/api/events');
   es.addEventListener('hello', e => {
-    const d = JSON.parse(e.data); via = d.via || ''; setLinked(true); $('laptop').textContent = d.laptop;
+    const d = JSON.parse(e.data); via = d.via || ''; setLinked(true); $('laptop').textContent = d.laptop; reportVisible();
     history(); inbound(d.out); battery(); shared(); capturePhoneClip();
   });
   es.addEventListener('history', e => historyLive(JSON.parse(e.data)));
 
-  es.addEventListener('out', e => { const items = JSON.parse(e.data); const fresh = items.filter(i => !rowsIn.has(i.id)); inbound(items); notifyIncoming(fresh); });
+  es.addEventListener('out', e => inbound(JSON.parse(e.data)));
   es.onerror = () => setLinked(false); // EventSource reconnects by itself
 }
 
@@ -191,7 +191,7 @@ function showSaveBar() {
   if (n) $('saveAllText').textContent = `${n === 1 ? 'A file' : n + ' files'} from ${$('laptop').textContent}`;
 }
 $('saveAllBtn').onclick = () => retryWaiting();
-const APP_VERSION = 'q5';
+const APP_VERSION = 'q6';
 async function diag(stage, extra) {
   let perm = 'n/a';
   perm = await permission(false);
@@ -595,6 +595,12 @@ $('notifyBtn').onclick = async () => {
   showNotifyState();
 };
 // app open but in the background: the page itself posts the notification (the laptop only pushes when the app is closed)
+function reportVisible() {
+  fetch('/api/status', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ visible: !document.hidden }),
+    keepalive: true }).catch(() => {});
+}
+document.addEventListener('visibilitychange', reportVisible);
+addEventListener('pagehide', () => { if (!document.hidden) return; reportVisible(); });
 async function notifyIncoming(items) {
   if (!document.hidden || !canNotify || Notification.permission !== 'granted' || !items.length) return;
   const files = items.filter(i => i.kind !== 'text');

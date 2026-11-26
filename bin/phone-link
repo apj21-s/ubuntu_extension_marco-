@@ -413,6 +413,8 @@ class Hub:
 
     def detach(self, dev, q):
         with self.lock:
+            if dev in self.devices:
+                self.devices[dev]["visible"] = False
             lst = self.streams.get(dev, [])
             if q in lst:
                 lst.remove(q)
@@ -453,10 +455,11 @@ class Hub:
             self.outbox.extend(items)
             self._save_outbox()
             live = bool(self.streams.get(dev))
+            on_screen = live and self.devices[dev].get("visible", False)
         for it in items:
             log("offered", name=it["name"], size=it["size"], to=self.devices[dev]["name"])
         self.push(dev, "out", self.out_for(dev))
-        if not live:   # the app is closed: wake the phone with a notification
+        if not on_screen:   # closed, or open but not on screen (Android freezes it there): notify
             files = [i for i in items if i["kind"] != "text"]
             if files:
                 title = f"{laptop_name()} sent " + (files[0]["name"] if len(files) == 1 else f"{len(files)} files")
@@ -963,6 +966,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and api == ["status"]:
                 b = self.json_body()
                 lvl = b.get("battery")
+                if "visible" in b and len(b) == 1:   # the app came to the screen or left it
+                    hub.touch(dev, visible=bool(b["visible"]))
+                    return self.reply(204)
                 hub.touch(dev, battery=float(lvl) if isinstance(lvl, (int, float)) else None, charging=bool(b.get("charging")))
                 hub.on_event("changed", None)
                 return self.reply(204)
